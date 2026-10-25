@@ -1,0 +1,9 @@
+AeroDrop
+Copyright 2026 Idowu Peter Ayeni
+
+This project includes third-party components under their own licenses:
+- ros2_ws/src/px4_msgs: PX4 message definitions (BSD 3-Clause), see ros2_ws/src/px4_msgs/LICENSE.
+- frontend/assets/vendor: MapLibre GL JS 5.6.2 (BSD 3-Clause), see frontend/assets/vendor/MAPLIBRE-LICENSE.txt.
+
+The launch and drop-off coordinates, no-fly rectangles and the Gazebo world are synthetic simulation
+inputs. AeroDrop is a simulation prototype, not a flight system.

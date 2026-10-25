@@ -1,0 +1,88 @@
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  xrce-agent:
+    image: microros/micro-ros-agent:humble
+    container_name: aerodrop_xrce_agent
+    ipc: host
+    network_mode: host
+    command: ["udp4", "-p", "8888"]
+    restart: unless-stopped
+    logging: *default-logging
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: aerodrop_backend
+    ports:
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+    logging: *default-logging
+
+  px4-sitl:
+    image: px4io/px4-sitl-gazebo@sha256:29a5a1b5af77e5d39b67bc6664d36acead63f9dfb829475216522b1feec8036e
+    container_name: aerodrop_px4_sitl
+    entrypoint: ["/bin/bash", "/aerodrop/px4_wind_entrypoint.sh"]
+    # The pxh> shell spins on a closed stdin and floods the log; keep a TTY attached.
+    stdin_open: true
+    tty: true
+    network_mode: host
+    environment:
+      HEADLESS: "1"
+      PX4_SIM_MODEL: gz_x500
+      PX4_GZ_WORLD: calgary_suburb
+      PX4_UXRCE_DDS_PORT: "8888"
+      # Autonomous SITL: no handheld controller or external GCS is required.
+      PX4_PARAM_COM_RC_IN_MODE: "4"
+      PX4_PARAM_NAV_DLL_ACT: "0"
+      PX4_PARAM_COM_DISARM_LAND: "2"
+    volumes:
+      - ./simulation/worlds/calgary_suburb.sdf:/opt/px4-gazebo/share/gz/worlds/calgary_suburb.sdf:ro
+      - ./simulation/launch/px4_wind_entrypoint.sh:/aerodrop/px4_wind_entrypoint.sh:ro
+    depends_on:
+      xrce-agent:
+        condition: service_started
+    restart: unless-stopped
+    logging: *default-logging
+
+  aerodrop-ros:
+    build:
+      context: .
+      dockerfile: ros2_ws/Dockerfile
+    container_name: aerodrop_ros_node
+    ipc: host
+    network_mode: host
+    volumes:
+      - ./ros2_ws:/ros2_ws
+    working_dir: /ros2_ws
+    environment:
+      ROS_DOMAIN_ID: "0"
+      PYTHONUNBUFFERED: "1"
+    command: >
+      bash -lc "source /opt/ros/humble/setup.bash &&
+      if [ ! -f src/px4_msgs/package.xml ]; then cp -an /opt/px4_msgs/. src/px4_msgs/; fi &&
+      colcon --log-base /tmp/aerodrop-log build --symlink-install --build-base /tmp/aerodrop-build --install-base /tmp/aerodrop-install && source /tmp/aerodrop-install/setup.bash &&
+      ros2 launch aerodrop_core mission_runner.launch.py
+      delivery_latitude:=51.130 delivery_longitude:=-114.089
+      home_latitude:=51.115 home_longitude:=-114.110
+      simulate_low_battery_after_seconds:=-1"
+    depends_on:
+      backend:
+        condition: service_healthy
+      xrce-agent:
+        condition: service_started
+      px4-sitl:
+        condition: service_started
+    restart: on-failure
+    logging: *default-logging
+

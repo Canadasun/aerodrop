@@ -1,0 +1,15 @@
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+__pycache__/
+.pytest_cache/
+*.bak-*
+ros2_ws/build/
+ros2_ws/install/
+ros2_ws/log/
+ros2_ws/core.*
+core.*
+test-artifacts/
+node_modules/
+.env

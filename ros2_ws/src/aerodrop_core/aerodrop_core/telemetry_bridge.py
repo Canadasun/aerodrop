@@ -68,7 +68,7 @@ class TelemetryBridge(Node):
                      px4_failsafe=bool(msg.failsafe), status_timestamp_unix=time.time())
 
     def _land(self, msg):
-        self._update(landed=bool(msg.landed))
+        self._update(landed=bool(msg.landed), land_timestamp_unix=time.time())
 
     def _ack(self, msg):
         self._update(command_ack={"command": int(msg.command), "result": int(msg.result),
@@ -82,10 +82,12 @@ class TelemetryBridge(Node):
         self._update(px4_battery_pct=actual, battery_pct=min(actual, 19.0) if injected and actual is not None else actual)
 
     def _mission_state(self, msg):
+        # The executor publishes every 0.5 s, so this timestamp is its heartbeat. The frame's own
+        # timestamp_unix only proves the bridge is alive, not that the mission controller is.
         try:
-            self._update(**json.loads(msg.data))
+            self._update(**json.loads(msg.data), mission_state_timestamp_unix=time.time())
         except (ValueError, TypeError):
-            self._update(state=msg.data)
+            self._update(state=msg.data, mission_state_timestamp_unix=time.time())
 
     def _stamp(self):
         self._update(timestamp_unix=time.time())

@@ -16,27 +16,31 @@ variable "compose_profiles" {
 
 locals {
   root = var.project_dir != "" ? abspath(var.project_dir) : abspath("${path.module}/../..")
-  backend_source_hash = sha256(join("", [
-    for path in sort(fileset("${local.root}/backend", "**")) :
-    filesha256("${local.root}/backend/${path}") if !strcontains(path, "__pycache__")
-  ]))
-  ros_source_hash = sha256(join("", [
-    for path in sort(fileset("${local.root}/ros2_ws/src/aerodrop_core", "**")) :
-    filesha256("${local.root}/ros2_ws/src/aerodrop_core/${path}")
-  ]))
+  # One hash per source tree. Each entry includes the relative path, so renames count as
+  # changes; generated Python caches are excluded so they never trigger a rebuild.
+  source_dirs = {
+    backend    = "backend"
+    frontend   = "frontend"
+    ros        = "ros2_ws/src"
+    simulation = "simulation"
+  }
+  source_hashes = {
+    for name, dir in local.source_dirs : name => sha256(join("\n", [
+      for path in sort(fileset("${local.root}/${dir}", "**")) :
+      "${path}:${filesha256("${local.root}/${dir}/${path}")}" if !strcontains(path, "__pycache__")
+    ]))
+  }
 }
 
 resource "terraform_data" "aerodrop_stack" {
   # Terraform owns the local prototype lifecycle while Compose remains the
   # portable container specification used by both developers and CI.
-  triggers_replace = {
-    compose = filesha256("${local.root}/docker-compose.yml")
-    backend = local.backend_source_hash
-    ros     = local.ros_source_hash
-    ros_img = filesha256("${local.root}/ros2_ws/Dockerfile")
-    world   = filesha256("${local.root}/simulation/worlds/calgary_suburb.sdf")
-    map     = filesha256("${local.root}/frontend/index.html")
-  }
+  triggers_replace = merge(local.source_hashes, {
+    compose  = filesha256("${local.root}/docker-compose.yml")
+    ros_img  = filesha256("${local.root}/ros2_ws/Dockerfile")
+    profiles = join(",", var.compose_profiles)
+    root     = local.root
+  })
 
   provisioner "local-exec" {
     working_dir = local.root

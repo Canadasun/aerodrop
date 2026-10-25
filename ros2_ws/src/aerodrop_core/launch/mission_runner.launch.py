@@ -15,8 +15,12 @@ def generate_launch_description():
         DeclareLaunchArgument("telemetry_ws_url", default_value="ws://127.0.0.1:8000/ws/telemetry/drone_01?role=drone"),
         DeclareLaunchArgument("simulate_low_battery_after_seconds", default_value="-1.0"),
     ]
+    # respawn: a crashed node restarts. The executor ignores commands that existed before it
+    # started, so a restart never replays an old mission; the dashboard shows the gap through
+    # the mission-controller heartbeat.
     mission = Node(
         package="aerodrop_core", executable="mission_executor", name="mission_executor",
+        respawn=True, respawn_delay=2.0,
         output="screen", parameters=[{
             "delivery_latitude": LaunchConfiguration("delivery_latitude"),
             "delivery_longitude": LaunchConfiguration("delivery_longitude"),
@@ -29,6 +33,7 @@ def generate_launch_description():
     )
     telemetry = Node(
         package="aerodrop_core", executable="telemetry_bridge", name="telemetry_bridge",
+        respawn=True, respawn_delay=2.0,
         output="screen", parameters=[{
             "home_latitude": LaunchConfiguration("home_latitude"),
             "home_longitude": LaunchConfiguration("home_longitude"),

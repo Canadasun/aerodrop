@@ -4,7 +4,7 @@ Run `docker compose up --build -d`, then open http://localhost:8000 in your Wind
 
 Wait for **READY**, set the destination, click **Plan corridor**, then **Review & launch** and confirm **Launch simulation**. The start coordinates must match the drone's current launch location. A short first flight can use latitude `51.116`, longitude `-114.109`. The default **Quick delivery** preset is a short flight. Choose **Full demonstration** for the original destination about 2.2 km away, which takes several minutes each way.
 
-The simulated aircraft takes off to 30 m, follows the planned corridor, hovers, simulates payload release, retraces the corridor, lands, and disarms. **COMPLETE** means landed and disarmed. **Return and land** skips delivery. **Low battery** latches a simulated low-battery condition and follows the reached route back. **Geofence breach** injects a synthetic geofence fault and commands PX4's native return-to-launch, ending at **ABORTED** after landing and disarming. Actual proximity to the synthetic map zones also triggers RTL. These are simulator controls, not controls for a physical drone.
+The simulated aircraft takes off to 30 m, follows the planned corridor, hovers, simulates payload release, retraces the corridor, lands, and disarms. **COMPLETE** means PX4's land detector reported landed and the vehicle disarmed, from fresh telemetry, held for one second; stale data never ends a mission. If landing or return-to-launch is not confirmed within 3 minutes, the mission stays in recovery and is flagged for operator attention instead of being reported as finished. **Return and land** skips delivery. **Low battery** latches a simulated low-battery condition and follows the reached route back. **Geofence breach** injects a synthetic geofence fault and commands PX4's native return-to-launch, ending at **ABORTED** after landing and disarming. Actual proximity to the synthetic map zones also triggers RTL. These are simulator controls, not controls for a physical drone.
 
 The page reconnects telemetry automatically and disables flight controls when position is stale. Route planning is separate from starting a mission; a mission uses the reviewed destination submitted when Launch simulation is confirmed. The planner is locked during an active flight. **Use drone** matches the launch point to the actual position. You can drag the drop-off marker or use **Pick on map**, inspect waypoints, toggle overlays and follow the aircraft.
 
@@ -43,6 +43,16 @@ The dashboard includes a route planner, live aircraft instruments, mission stage
 MapLibre 5.6.2 and its licence are bundled under `frontend/assets/vendor`; only basemap data still needs internet access. If basemap loading fails, the dashboard falls back to a plain map with route, geofence, marker and trail overlays. Coordinate planning remains available.
 
 `GET /config` supplies the actual planner geometry, buffers and supported controls. `GET /status` exposes the latest snapshot and data age. Health indicators distinguish backend connectivity, WebSocket connectivity, PX4 status freshness and valid global position. They do not claim container health from an API response alone.
+
+## Launch readiness
+
+The API and the dashboard apply the same launch policy. A mission starts only with fresh PX4 position and status (under 3 s old), a live mission-controller heartbeat, a landed and disarmed aircraft, no active PX4 failsafe, and a known battery level of at least 20%. `GET /status` lists every current blocker in `launch_blockers`. A false PX4 preflight flag is shown as a warning (`launch_warnings`), not a blocker: PX4 itself makes the final arming decision.
+
+Concurrent launch requests are serialized, so exactly one mission is accepted. In-flight actions (return, low battery, geofence) are queued, not overwritten, and a geofence action is handled first. The ROS nodes restart automatically if they crash, and a restarted executor ignores commands that existed before it started, so it never replays an old mission.
+
+## Route planning limits
+
+The planner keeps the whole corridor clear of the synthetic zones: it plans the centreline at least 130 m from each zone (the 100 m safety buffer plus the 30 m corridor half-width), so the shaded 60 m corridor never overlaps a buffer. Destinations must be 5 m to 5 km from the start. The synthetic zones are near downtown Calgary, outside the 5 km range of the Nose Hill launch point, so the default presets fly direct routes; the obstacle-avoidance logic is covered by the planner unit tests.
 
 Telemetry now includes measured horizontal/vertical speed, heading, landing status, PX4 preflight/failsafe state, command acknowledgements, active waypoints, payload state and mission timing. Unknown measurements remain unavailable instead of showing invented zeroes. Mission history is local to the browser; it is not a server database. Order/database modules in this checkout are empty placeholders and are explicitly marked unavailable.
 

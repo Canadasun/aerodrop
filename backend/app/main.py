@@ -6,6 +6,7 @@ restrictions. Replace them with validated, current geofence data before flight.
 from __future__ import annotations
 
 import heapq
+import threading
 import math
 import time
 import uuid
@@ -39,6 +40,12 @@ DEMO_ZONES = [
 ]
 SAFETY_MARGIN_M = 100.0
 CORRIDOR_HALF_WIDTH_M = 30.0
+# The whole corridor, not just its centreline, keeps the safety margin from every zone.
+PLANNING_MARGIN_M = SAFETY_MARGIN_M + CORRIDOR_HALF_WIDTH_M
+MIN_ROUTE_DISTANCE_M = 5.0
+MAX_ROUTE_DISTANCE_M = 5_000.0   # the simulator's operating envelope for one battery
+FRESH_SECONDS = 3.0
+LOW_BATTERY_PCT = 20.0
 
 
 class Coordinate(BaseModel):
@@ -94,13 +101,18 @@ def from_local(point: tuple[float, float]) -> Coordinate:
     )
 
 
-def expanded_zones():
+def expanded_zones(margin: float = SAFETY_MARGIN_M):
     result = []
     for zone in DEMO_ZONES:
         xmin, ymin, xmax, ymax = zone["bounds_m"]
-        result.append((zone["id"], (xmin - SAFETY_MARGIN_M, ymin - SAFETY_MARGIN_M,
-                                     xmax + SAFETY_MARGIN_M, ymax + SAFETY_MARGIN_M)))
+        result.append((zone["id"], (xmin - margin, ymin - margin, xmax + margin, ymax + margin)))
     return result
+
+
+def planning_zones():
+    """Zones grown by the safety margin plus the corridor half-width, so planning the
+    centreline around them keeps the full advertised corridor outside every safety buffer."""
+    return expanded_zones(PLANNING_MARGIN_M)
 
 
 def inside(point, rect) -> bool:
@@ -131,11 +143,17 @@ def segment_hits_rect(a, b, rect) -> bool:
     return True
 
 
-def route(start, end):
-    zones = expanded_zones()
-    for zone_id, rect in zones:
+def check_endpoints(start, end):
+    for zone_id, rect in planning_zones():
         if inside(start, rect) or inside(end, rect):
-            raise HTTPException(status_code=422, detail=f"Origin or target lies inside {zone_id} safety buffer")
+            raise HTTPException(status_code=422, detail=(
+                f"Origin or target is too close to {zone_id}: the {CORRIDOR_HALF_WIDTH_M * 2:.0f} m corridor "
+                f"must stay outside its {SAFETY_MARGIN_M:.0f} m safety buffer"))
+
+
+def route(start, end):
+    zones = planning_zones()
+    check_endpoints(start, end)
 
     # Visibility graph: corners of each expanded rectangle are candidate turns.
     nodes = [start, end]
@@ -195,8 +213,20 @@ def create_route(request: RouteRequest):
     origin, target = request.endpoints()
     start = to_local(origin, CALGARY_ORIGIN[0])
     end = to_local(target, CALGARY_ORIGIN[0])
+    check_endpoints(start, end)   # a restricted endpoint is the more specific error
+    direct = math.hypot(end[0] - start[0], end[1] - start[1])
+    if direct < MIN_ROUTE_DISTANCE_M:
+        raise HTTPException(status_code=422, detail=f"Destination must be at least {MIN_ROUTE_DISTANCE_M:.0f} m from the start")
+    if direct > MAX_ROUTE_DISTANCE_M:
+        raise HTTPException(status_code=422, detail=(
+            f"Destination is {direct / 1000:.1f} km away; the simulator supports routes up to "
+            f"{MAX_ROUTE_DISTANCE_M / 1000:.0f} km"))
     path, distance = route(start, end)
-    bypassed = [zone_id for zone_id, bounds in expanded_zones()
+    if distance > MAX_ROUTE_DISTANCE_M:
+        raise HTTPException(status_code=422, detail=(
+            f"The safe corridor is {distance / 1000:.1f} km; the simulator supports routes up to "
+            f"{MAX_ROUTE_DISTANCE_M / 1000:.0f} km"))
+    bypassed = [zone_id for zone_id, bounds in planning_zones()
                 if segment_hits_rect(start, end, bounds)]
     return {
         "status": "planned",
@@ -213,6 +243,44 @@ def create_route(request: RouteRequest):
 
 mission_command: dict = {}
 IDLE_STATES = {"READY", "COMPLETE", "ABORTED", "ERROR"}
+# Handlers run in a thread pool: the readiness check, queue check and enqueue must be one step.
+mission_lock = threading.Lock()
+
+
+def _age(live: dict, key: str, now: float) -> float:
+    value = live.get(key)
+    return now - value if isinstance(value, (int, float)) and math.isfinite(value) else math.inf
+
+
+def launch_blockers(live: dict, now: float | None = None) -> list[str]:
+    """Every reason the aircraft may not start a mission. The dashboard shows the same list."""
+    now = time.time() if now is None else now
+    blockers = []
+    if _age(live, "position_timestamp_unix", now) > FRESH_SECONDS:
+        blockers.append("Waiting for fresh PX4 position telemetry")
+    if _age(live, "status_timestamp_unix", now) > FRESH_SECONDS:
+        blockers.append("Waiting for a fresh PX4 status report")
+    if _age(live, "mission_state_timestamp_unix", now) > FRESH_SECONDS:
+        blockers.append("Mission controller is not reporting; check the aerodrop_ros_node container")
+    if live.get("state") not in IDLE_STATES or live.get("armed"):
+        blockers.append("Drone must be idle and disarmed to start a mission")
+    if live.get("landed") is not True:
+        blockers.append("PX4 has not confirmed the aircraft is landed")
+    if live.get("px4_failsafe"):
+        blockers.append("PX4 reports an active failsafe")
+    battery = live.get("px4_battery_pct") if live.get("low_battery_injected") else live.get("battery_pct")
+    if not isinstance(battery, (int, float)) or not math.isfinite(battery):
+        blockers.append("Waiting for the aircraft battery report")
+    elif battery < LOW_BATTERY_PCT:
+        blockers.append(f"Battery below {LOW_BATTERY_PCT:.0f}%")
+    return blockers
+
+
+def launch_warnings(live: dict) -> list[str]:
+    warnings = []
+    if live.get("preflight_checks_pass") is False:
+        warnings.append("PX4 preflight flag is not set; PX4 makes the final arming decision")
+    return warnings
 
 
 class MissionRequest(RouteRequest):
@@ -227,22 +295,22 @@ def get_mission():
 @app.post("/mission", status_code=202)
 def start_mission(request: MissionRequest):
     global mission_command
-    live = hub.latest.get("drone_01", {})
-    if time.time() - live.get("position_timestamp_unix", 0) > 3:
-        raise HTTPException(409, "Waiting for fresh PX4 position telemetry")
-    if live.get("state") not in IDLE_STATES or live.get("armed"):
-        raise HTTPException(409, "Drone must be idle and disarmed to start a mission")
-    if mission_command and mission_command.get("id") != live.get("mission_id"):
-        if time.time() - mission_command.get("created_at", 0) < 10:
-            raise HTTPException(409, "A mission is already queued")
-    origin, _ = request.endpoints()
-    if abs(origin.latitude - live["latitude"]) > .00015 or abs(origin.longitude - live["longitude"]) > .0002:
-        raise HTTPException(422, "Start point must match the drone launch location")
-    planned = create_route(request)
-    mission_command = {"id": str(uuid.uuid4()), "created_at": time.time(),
-                       "waypoints": planned["waypoints"],
-                       "simulate_low_battery_after_seconds": request.simulate_low_battery_after_seconds}
-    return mission_command
+    with mission_lock:
+        live = dict(hub.latest.get("drone_01", {}))
+        blockers = launch_blockers(live)
+        if blockers:
+            raise HTTPException(409, blockers[0])
+        if mission_command and mission_command.get("id") != live.get("mission_id"):
+            if time.time() - mission_command.get("created_at", 0) < 10:
+                raise HTTPException(409, "A mission is already queued")
+        origin, _ = request.endpoints()
+        if abs(origin.latitude - live["latitude"]) > .00015 or abs(origin.longitude - live["longitude"]) > .0002:
+            raise HTTPException(422, "Start point must match the drone launch location")
+        planned = create_route(request)
+        mission_command = {"id": str(uuid.uuid4()), "created_at": time.time(),
+                           "waypoints": planned["waypoints"], "actions": [],
+                           "simulate_low_battery_after_seconds": request.simulate_low_battery_after_seconds}
+        return mission_command
 
 
 class MissionAction(BaseModel):
@@ -251,12 +319,14 @@ class MissionAction(BaseModel):
 
 @app.post("/mission/action", status_code=202)
 def mission_action(request: MissionAction):
-    live = hub.latest.get("drone_01", {})
-    if time.time()-live.get("timestamp_unix",0)>3 or live.get("state") in IDLE_STATES or not mission_command:
-        raise HTTPException(409, "No active mission")
-    action={"id": str(uuid.uuid4()), "name":request.name}
-    mission_command["action"]=action
-    return action
+    with mission_lock:
+        live = hub.latest.get("drone_01", {})
+        if time.time()-live.get("timestamp_unix",0)>3 or live.get("state") in IDLE_STATES or not mission_command:
+            raise HTTPException(409, "No active mission")
+        action={"id": str(uuid.uuid4()), "name":request.name, "created_at": time.time()}
+        # Queued, never overwritten: a safety action must not be lost behind a later one.
+        mission_command.setdefault("actions", []).append(action)
+        return action
 
 
 @app.get("/config")
@@ -274,6 +344,7 @@ def dashboard_config():
         "cruise_altitude_m": 30.0,
         "corridor_half_width_m": CORRIDOR_HALF_WIDTH_M,
         "geofence_buffer_m": SAFETY_MARGIN_M,
+        "max_route_distance_m": MAX_ROUTE_DISTANCE_M,
         "low_battery_threshold_pct": 20,
         "position_freshness_seconds": 3,
         "payload_mode": "simulated",
@@ -306,4 +377,7 @@ def dashboard_status():
             "telemetry_age_seconds": telemetry_age,
             "position_fresh": position_age is not None and position_age < 3,
             "telemetry_fresh": telemetry_age is not None and telemetry_age < 3,
+            "controller_fresh": _age(live, "mission_state_timestamp_unix", now) <= FRESH_SECONDS,
+            "launch_blockers": launch_blockers(live, now),
+            "launch_warnings": launch_warnings(live),
             "mission": mission_command or None}

@@ -1,5 +1,8 @@
 """Unit checks for route clearance around the prototype safety buffers."""
+import math
 import sys
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -7,7 +10,14 @@ from fastapi import HTTPException
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
-from app.main import RouteRequest, create_route, expanded_zones, route, segment_hits_rect  # noqa: E402
+from app.main import (CORRIDOR_HALF_WIDTH_M, DEMO_ZONES, SAFETY_MARGIN_M, RouteRequest,  # noqa: E402
+                      create_route, expanded_zones, route, segment_hits_rect)
+
+
+def _distance_to_rect(point, rect):
+    x, y = point
+    xmin, ymin, xmax, ymax = rect
+    return math.hypot(max(xmin - x, 0, x - xmax), max(ymin - y, 0, y - ymax))
 
 
 class RoutePlannerTests(unittest.TestCase):
@@ -17,6 +27,33 @@ class RoutePlannerTests(unittest.TestCase):
         self.assertGreaterEqual(len(waypoints), 3)
         for a, b in zip(waypoints, waypoints[1:]):
             self.assertFalse(any(segment_hits_rect(a, b, rect) for _, rect in expanded_zones()))
+
+    def test_whole_corridor_keeps_the_safety_margin(self):
+        # Sample every segment: the centreline must stay margin + half-width from each raw zone,
+        # so the shaded corridor never overlaps a safety buffer (found in the Codex audit).
+        waypoints, _ = route((-2_000.0, 0.0), (2_000.0, 0.0))
+        required = SAFETY_MARGIN_M + CORRIDOR_HALF_WIDTH_M
+        for a, b in zip(waypoints, waypoints[1:]):
+            for i in range(201):
+                t = i / 200
+                point = (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
+                for zone in DEMO_ZONES:
+                    self.assertGreaterEqual(_distance_to_rect(point, zone["bounds_m"]), required - 1e-6)
+
+    def test_endpoint_too_close_for_the_corridor_is_rejected(self):
+        # 110 m from the central zone: outside its 100 m buffer, but a 30 m half-width corridor
+        # starting there would overlap the buffer.
+        with self.assertRaises(HTTPException) as raised:
+            route((-1_010.0, 0.0), (-2_000.0, 0.0))
+        self.assertEqual(raised.exception.status_code, 422)
+        self.assertIn("corridor", raised.exception.detail)
+
+    def test_route_length_limits(self):
+        for destination, message in (([51.115, -114.110], "at least"), ([52.0, -114.110], "supports routes up to")):
+            with self.subTest(destination=destination), self.assertRaises(HTTPException) as raised:
+                create_route(RouteRequest(start=[51.115, -114.110], destination=destination))
+            self.assertEqual(raised.exception.status_code, 422)
+            self.assertIn(message, raised.exception.detail)
 
     def test_route_rejects_endpoint_inside_zone_buffer(self):
         start = (0.0, 0.0)
@@ -61,9 +98,60 @@ class MissionCommandTests(unittest.TestCase):
         with self.assertRaises(HTTPException) as raised:
             self.api.start_mission(request)
         self.assertEqual(raised.exception.status_code,409)
+    def ready(self, **overrides):
+        now=time.time()
+        live={'state':'READY','position_timestamp_unix':now,'status_timestamp_unix':now,
+              'mission_state_timestamp_unix':now,'latitude':51.115,'longitude':-114.110,
+              'armed':False,'landed':True,'px4_failsafe':False,'battery_pct':80,'px4_battery_pct':80}
+        live.update(overrides); return live
+    def test_launch_requires_every_readiness_condition(self):
+        request=self.api.MissionRequest(start=[51.115,-114.110],destination=[51.116,-114.109])
+        old=time.time()-100
+        for name, patch in [('stale PX4 status',{'status_timestamp_unix':old}),
+                            ('silent mission controller',{'mission_state_timestamp_unix':old}),
+                            ('not landed',{'landed':False}), ('failsafe',{'px4_failsafe':True}),
+                            ('low battery',{'battery_pct':5,'px4_battery_pct':5}),
+                            ('unknown battery',{'battery_pct':None}),
+                            ('injected low battery',{'low_battery_injected':True,'battery_pct':80,'px4_battery_pct':5})]:
+            with self.subTest(name):
+                self.api.mission_command={}
+                self.api.hub.latest['drone_01']=self.ready(**patch)
+                with self.assertRaises(HTTPException) as raised:
+                    self.api.start_mission(request)
+                self.assertEqual(raised.exception.status_code,409)
+        self.api.hub.latest['drone_01']=self.ready(preflight_checks_pass=False)
+        self.api.mission_command={}
+        self.assertTrue(self.api.start_mission(request)['id'], 'a false preflight flag warns but does not block')
+        self.assertIn('preflight', self.api.dashboard_status()['launch_warnings'][0])
+    def test_concurrent_launches_accept_exactly_one(self):
+        self.api.hub.latest['drone_01']=self.ready()
+        request=self.api.MissionRequest(start=[51.115,-114.110],destination=[51.116,-114.109])
+        real_route=self.api.create_route; barrier=threading.Barrier(2, timeout=0.5)
+        def slow_route(req):
+            try: barrier.wait()      # both requests reach planning together
+            except threading.BrokenBarrierError: pass
+            return real_route(req)
+        self.api.create_route=slow_route
+        results=[]
+        def launch():
+            try: results.append(self.api.start_mission(request)['id'])
+            except HTTPException as exc: results.append(exc.status_code)
+        try:
+            threads=[threading.Thread(target=launch) for _ in range(2)]
+            for t in threads: t.start()
+            for t in threads: t.join()
+        finally:
+            self.api.create_route=real_route
+        self.assertEqual(results.count(409), 1, results)
+        self.assertEqual(sum(isinstance(r,str) for r in results), 1, results)
+    def test_actions_queue_instead_of_overwriting(self):
+        self.api.hub.latest['drone_01']=self.ready(state='NAVIGATING',armed=True,timestamp_unix=time.time())
+        self.api.mission_command={'id':'m1','created_at':time.time(),'waypoints':[],'actions':[]}
+        self.api.mission_action(self.api.MissionAction(name='return'))
+        self.api.mission_action(self.api.MissionAction(name='geofence'))
+        self.assertEqual([a['name'] for a in self.api.mission_command['actions']],['return','geofence'])
     def test_rejects_second_queued_mission_and_active_flight(self):
-        import time
-        live={'state':'READY','position_timestamp_unix':time.time(),'latitude':51.115,'longitude':-114.110,'armed':False}
+        live=self.ready()
         self.api.hub.latest['drone_01']=live
         request=self.api.MissionRequest(start=[51.115,-114.110],destination=[51.116,-114.109])
         command=self.api.start_mission(request)

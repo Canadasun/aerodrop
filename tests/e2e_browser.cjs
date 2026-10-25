@@ -39,7 +39,8 @@ fs.mkdirSync(output,{recursive:true});
    }
    if(t.state==='ERROR')throw Error(JSON.stringify(t));
    if(t.mission_id && ['COMPLETE','ABORTED'].includes(t.state) && Date.now()-start>3000){
-    if(t.armed || t.altitude_m>2)throw Error('Not landed/disarmed: '+JSON.stringify(t));
+    if(t.state!==(scenario==='geofence'?'ABORTED':'COMPLETE'))throw Error(`Wrong terminal state for ${scenario}: `+JSON.stringify(t));
+    if(t.armed || t.landed!==true || !Number.isFinite(t.altitude_m) || t.altitude_m>2)throw Error('Not landed/disarmed: '+JSON.stringify(t));
     if(scenario==='delivery' && !states.includes('WINCH_DROP'))throw Error('Payload step missing');
     if(['low_battery','return'].includes(scenario) && states.includes('WINCH_DROP'))throw Error('Payload released during abort');
     if(scenario==='geofence' && !states.includes('RTL_FAILSAFE'))throw Error('RTL not exercised');
@@ -51,6 +52,7 @@ fs.mkdirSync(output,{recursive:true});
    await page.waitForTimeout(250);
   }
   if(!finished)throw Error('Timed out '+scenario+' '+states.join(','));
+  if(maxAltitude<25)throw Error(`${scenario} never reached cruise altitude (max ${maxAltitude} m)`);
   results.push({scenario,states,maxAltitude,inspectedWaypoints,finalTelemetry,passed:true});
   await page.evaluate(()=>window.scrollTo(0,0));
   await page.screenshot({path:`${output}/aerodrop-${scenario}.png`});

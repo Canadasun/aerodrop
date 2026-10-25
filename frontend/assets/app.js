@@ -32,6 +32,7 @@ function age(key) { return live && finite(live[key]) ? Math.max(0, Date.now()/10
 function positionFresh() { return age('position_timestamp_unix') < (state.config?.position_freshness_seconds || 3); }
 function streamFresh() { return state.wsConnected && Date.now()-state.lastMessage < 3000; }
 function controllerFresh() { return age('status_timestamp_unix') < 3; }
+function missionControllerFresh() { return age('mission_state_timestamp_unix') < 3; }
 function idle() { return !!live && IDLE.has(live.state) && !live.armed; }
 function isActive() { return !!live && !IDLE.has(live.state) && live.state !== 'WAITING_FOR_POSITION'; }
 function payloadLabel(value) { return ({RELEASED:'Payload released', SKIPPED:'Delivery skipped', LOWERING:'Releasing payload', PENDING:'On board'})[value] || 'Awaiting mission'; }
@@ -242,9 +243,13 @@ function launchBlocker() {
   if(!streamFresh())return 'Waiting for a live telemetry connection.';
   if(!positionFresh())return 'Waiting for a fresh aircraft position.';
   if(!controllerFresh())return 'Waiting for a fresh PX4 status report.';
+  if(!missionControllerFresh())return 'Mission controller is not reporting. Check the aerodrop_ros_node container.';
   if(state.pending)return 'Waiting for the aircraft to acknowledge the command.';
+  if(live?.attention_required)return live.detail||'Landing not confirmed. Operator attention required.';
   if(isActive())return 'A mission is in progress. Monitor the flight or request return.';
   if(live?.armed)return 'The aircraft must be disarmed before a new delivery.';
+  if(live?.landed!==true)return 'Waiting for PX4 to confirm the aircraft is landed.';
+  if(live?.px4_failsafe)return 'PX4 reports an active failsafe. Resolve it before dispatch.';
   if(!idle())return isActive()?'A mission is already in progress.':'Waiting for the aircraft to become ready.';
   if(state.planning)return 'The route planner is calculating a corridor.';
   if(!state.planned||state.routeDirty)return 'Plan the corridor before launching.';
@@ -256,7 +261,7 @@ function launchBlocker() {
 }
 function renderControls() {
   const blocker=launchBlocker();
-  $('startMission').disabled=!!blocker;$('launchReason').textContent=blocker || 'Aircraft connected. Ready for your review.';
+  $('startMission').disabled=!!blocker;$('launchReason').textContent=blocker || (live?.preflight_checks_pass===false?'Ready for your review. PX4 preflight flag is not set; PX4 makes the final arming decision.':'Aircraft connected. Ready for your review.');
   const active=isActive();
   $('plannerFields').disabled=active;
   $('preset').disabled=active||!state.config;
@@ -264,13 +269,13 @@ function renderControls() {
   $('routeButton').disabled=state.planning||active||!state.api;
   $('routeButton').innerHTML=state.planning ? '<span class="spinner"></span>Planning corridor…' : `${icon('map')}Plan corridor${icon('arrow')}`;
   $('routeButton').querySelector('svg:last-child')?.classList.add('button-end');
-  const operational=state.api&&streamFresh()&&positionFresh()&&controllerFresh()&&OPERABLE.has(live?.state)&&!state.pending;
+  const operational=state.api&&streamFresh()&&positionFresh()&&controllerFresh()&&missionControllerFresh()&&OPERABLE.has(live?.state)&&!state.pending;
   for(const id of ['returnMission','batteryTest','geofenceTest'])$(id).disabled=!operational;
   $('useDrone').disabled=active||!positionFresh();$('pickDestination').disabled=active||!state.mapReady;
   $('fitRoute').disabled=!state.mapReady||displayedRoute().length<2;
   $('followDrone').disabled=!state.mapReady||!positionFresh();
   $('copyMissionId').disabled=!live?.mission_id;
-  const checks=[['Backend',state.api],['Live telemetry',streamFresh()],['Position fix',positionFresh()],['Disarmed',!!live&&!live.armed&&controllerFresh()]];
+  const checks=[['Backend',state.api],['Live telemetry',streamFresh()],['Position fix',positionFresh()],['Mission controller',missionControllerFresh()],['Disarmed',!!live&&!live.armed&&controllerFresh()]];
   $('preflightChecks').innerHTML=checks.map(([label,good])=>`<span class="check-item${good?' good':''}"><i></i>${label}</span>`).join('');
   if(active&&state.picking)setPicking(false);
   destinationMarker?.setDraggable(!active);
@@ -354,7 +359,8 @@ function renderSystems() {
     ['system','Dispatch API',state.api?'Online':'Offline',state.api?'Route planning and mission commands are reachable.':'Waiting for a successful backend response.',state.api,'Health check: '+(state.api?'responding':'unavailable')],
     ['signal','Telemetry relay',streamFresh()?'Streaming':'No recent stream',state.wsConnected?'WebSocket connected to the local telemetry relay.':'Reconnecting automatically to the telemetry relay.',streamFresh(),state.lastMessage?`Last frame ${Math.max(0,(Date.now()-state.lastMessage)/1000).toFixed(1)} s ago`:'No frames received'],
     ['target','Position estimate',positionFresh()?'Fresh position':'Waiting',positionFresh()?'PX4 reports a valid horizontal and vertical position.':'No recent valid position. Launch remains disabled.',positionFresh(),Number.isFinite(positionAge)?`Sample age ${positionAge.toFixed(1)} s`:'No valid sample'],
-    ['flight','Flight controller',controllerFresh()?'Connected':'Waiting',controllerFresh()?`${NAV[live?.px4_nav_state]||'PX4'} · ${live?.armed?'armed':'disarmed'}${live?.px4_failsafe?' · failsafe active':''}`:'Waiting for a recent PX4 vehicle-status message.',controllerFresh(),live?.preflight_checks_pass?'PX4 preflight checks pass':'PX4 readiness is confirmed during arming'],
+    ['flight','Flight controller',controllerFresh()?'Connected':'Waiting',controllerFresh()?`${NAV[live?.px4_nav_state]||'PX4'} · ${live?.armed?'armed':'disarmed'}${live?.px4_failsafe?' · failsafe active':''}`:'Waiting for a recent PX4 vehicle-status message.',controllerFresh(),live?.preflight_checks_pass?'PX4 preflight checks pass':'PX4 preflight flag not set; PX4 makes the final arming decision'],
+    ['system','Mission controller',missionControllerFresh()?'Reporting':'Not reporting',missionControllerFresh()?'The ROS 2 mission executor is publishing its state.':'No recent state from the ROS 2 mission executor. Launch and flight actions stay disabled.',missionControllerFresh(),Number.isFinite(age('mission_state_timestamp_unix'))?`Last report ${age('mission_state_timestamp_unix').toFixed(1)} s ago`:'No report received'],
     ['box','Payload release','Simulated','The mission executor performs a timed release; no winch hardware is connected.',false,payloadLabel(live?.payload_status)],
     ['layers','Airspace model','Synthetic zones',`${state.config?.zones?.features?.length??'—'} demo rectangles with ${state.config?.geofence_buffer_m??'—'} m safety buffers.`,!!state.config,'Not authoritative flight restrictions'],
   ];

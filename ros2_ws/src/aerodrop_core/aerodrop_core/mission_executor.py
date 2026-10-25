@@ -25,6 +25,10 @@ def topic(name, cls):
 class MissionExecutor(Node):
     ACTIVE = {'ARMING', 'TAKEOFF', 'NAVIGATING', 'DELIVERY_HOVER', 'WINCH_DROP',
               'RETURNING', 'LANDING', 'RTL_FAILSAFE'}
+    FRESH_S = 2.0              # position, status and land-detector messages must be this recent
+    LANDED_HOLD_S = 1.0        # landed + disarmed must hold this long before the mission ends
+    CONFIRM_DEADLINE_S = 180.0 # landing/RTL not confirmed by then: flag for the operator
+    ACTION_PRIORITY = {'geofence': 0, 'return': 1, 'low_battery': 2}
     def __init__(self):
         super().__init__('aerodrop_mission_executor')
         for key, value in [('backend_url','http://127.0.0.1:8000/route'),
@@ -37,11 +41,14 @@ class MissionExecutor(Node):
         self.home_lon = float(self.get_parameter('home_longitude').value)
         self.state = 'WAITING_FOR_POSITION'
         self.position = self.status = self.battery = self.land = None
-        self.position_received = self.status_received = 0.0
+        self.position_received = self.status_received = self.land_received = 0.0
+        self.landed_since = None; self.attention_required = False; self.last_disarm = 0.0
+        self.state_detail = ''
+        self.primed = False; self.seen_action_ids = set(); self.actions = []
         self.route = []; self.return_route = []; self.route_index = 0
         self.mission_id = None; self.last_command_id = None; self.pending = None
         self.last_action_id = None
-        self.lock = threading.Lock(); self.action = None
+        self.lock = threading.Lock()
         self.started = self.state_started = time.monotonic()
         self.last_request = 0.0; self.setpoints = 0; self.injection = False
         self.started_unix = None; self.ended_unix = None
@@ -68,7 +75,7 @@ class MissionExecutor(Node):
             self.position=msg; self.position_received=time.monotonic()
     def on_status(self,msg):
         self.status=msg; self.status_received=time.monotonic()
-    def on_land(self,msg): self.land=msg
+    def on_land(self,msg): self.land=msg; self.land_received=time.monotonic()
     def on_battery(self,msg):
         self.battery_pct=100*float(msg.remaining) if 0<=msg.remaining<=1 else None
     def on_ack(self,msg):
@@ -77,7 +84,8 @@ class MissionExecutor(Node):
             self.get_logger().warning(self.detail)
     def armed(self): return self.status is not None and self.status.arming_state==2
     def set_state(self,value,detail=''):
-        self.state=value; self.detail=detail; self.state_started=time.monotonic()
+        self.state=value; self.detail=self.state_detail=detail; self.state_started=time.monotonic()
+        self.landed_since=None; self.attention_required=False
         if value in ('COMPLETE', 'ABORTED', 'ERROR'):
             self.ended_at=time.monotonic(); self.ended_unix=time.time()
         self.last_request=0.0
@@ -92,6 +100,7 @@ class MissionExecutor(Node):
                                           'payload_status':('RELEASED' if self.payload_released else 'SKIPPED' if self.payload_skipped else 'LOWERING' if self.state=='WINCH_DROP' else 'PENDING'),
                                           'mission_started_unix':self.started_unix, 'mission_finished_unix':self.ended_unix,
                                           'mission_elapsed_s':round((self.ended_at or time.monotonic())-self.started,1) if self.mission_id else 0,
+                                          'attention_required':self.attention_required,
                                           'cruise_altitude_m':30.0})
         self.state_pub.publish(msg)
     def command(self,command,p1=0.0,p2=0.0):
@@ -104,17 +113,41 @@ class MissionExecutor(Node):
             try:
                 with urllib.request.urlopen(self.base+'/mission',timeout=2) as response:
                     data=json.load(response)
-                with self.lock:
-                    if data.get('id') and data['id']!=self.last_command_id:
-                        if time.time()-data.get('created_at',0)<10:
-                            self.pending=data
-                        self.last_command_id=data['id']
-                    action=data.get('action')
-                    if action and action['id']!=self.last_action_id:
-                        self.action=action['name']; self.last_action_id=action['id']
+                self.ingest(data)
             except Exception as exc:
                 self.get_logger().debug(f'Mission API unavailable: {exc}')
             time.sleep(0.5)
+    def ingest(self,data):
+        """Take new commands from the API. The first successful poll after a (re)start only records
+        what already exists, so a restarted executor never replays an old mission or action."""
+        with self.lock:
+            actions=[a for a in (data.get('actions') or []) if isinstance(a,dict) and a.get('id')]
+            if not self.primed:
+                self.last_command_id=data.get('id'); self.seen_action_ids={a['id'] for a in actions}
+                self.primed=True; return
+            if data.get('id') and data['id']!=self.last_command_id:
+                if time.time()-data.get('created_at',0)<10:
+                    self.pending=data
+                self.last_command_id=data['id']
+            for a in actions:
+                if a['id'] not in self.seen_action_ids:
+                    self.seen_action_ids.add(a['id']); self.actions.append(a['name'])
+    def landed_confirmed(self,now,fresh):
+        """Landed and disarmed, from fresh land-detector and status data, held for LANDED_HOLD_S."""
+        ok=(fresh and self.land is not None and now-self.land_received<self.FRESH_S
+            and bool(self.land.landed) and not self.armed())
+        if not ok:
+            self.landed_since=None; return False
+        if self.landed_since is None: self.landed_since=now
+        return now-self.landed_since>=self.LANDED_HOLD_S
+    def check_confirmation_deadline(self,now,fresh):
+        if self.attention_required: return
+        self.detail=(self.state_detail if fresh else
+                     'Landing confirmation unavailable: telemetry stale; PX4 recovery continues')
+        if now-self.state_started>self.CONFIRM_DEADLINE_S:
+            self.attention_required=True
+            self.detail=f'{"Landing" if self.state=="LANDING" else "RTL"} not confirmed after {self.CONFIRM_DEADLINE_S:.0f} s; operator attention required'
+            self.get_logger().error(self.detail)
     def begin(self,data):
         if self.state in self.ACTIVE or self.armed(): return
         if self.position is None or time.time()-data.get('created_at',0)>=10: return
@@ -159,12 +192,13 @@ class MissionExecutor(Node):
                 with self.lock: self.pending=None
                 self.begin(pending)
             else: return
-        with self.lock: action=self.action; self.action=None
-        if action=='low_battery': self.low_battery_latched=True; self.injection=True
-        if action=='geofence' and self.state not in ('LANDING','RTL_FAILSAFE'):
-            self.set_state('RTL_FAILSAFE','Simulated geofence breach; PX4 RTL')
-        if action=='return' and self.state in ('TAKEOFF','NAVIGATING','DELIVERY_HOVER','WINCH_DROP'):
-            self.return_home('Operator requested return')
+        with self.lock: actions=sorted(self.actions,key=lambda a:self.ACTION_PRIORITY.get(a,9)); self.actions=[]
+        for action in actions:
+            if action=='low_battery': self.low_battery_latched=True; self.injection=True
+            if action=='geofence' and self.state not in ('LANDING','RTL_FAILSAFE'):
+                self.set_state('RTL_FAILSAFE','Simulated geofence breach; PX4 RTL')
+            if action=='return' and self.state in ('TAKEOFF','NAVIGATING','DELIVERY_HOVER','WINCH_DROP'):
+                self.return_home('Operator requested return')
         if not fresh:
             if self.state not in ('RTL_FAILSAFE','LANDING'):
                 self.set_state('RTL_FAILSAFE','Position/status telemetry stale; PX4 RTL')
@@ -172,14 +206,18 @@ class MissionExecutor(Node):
             self.payload_skipped=not self.payload_released
             if now-self.last_request>2:
                 self.command(VehicleCommand.VEHICLE_CMD_NAV_RETURN_TO_LAUNCH); self.last_request=now
-            if self.land and self.land.landed and not self.armed(): self.set_state('ABORTED','RTL landed and disarmed')
+            if self.landed_confirmed(now,fresh): self.set_state('ABORTED','RTL landed and disarmed')
+            else: self.check_confirmation_deadline(now,fresh)
             return
         if self.state=='LANDING':
             if now-self.last_request>2:
                 self.command(VehicleCommand.VEHICLE_CMD_NAV_LAND); self.last_request=now
-            if self.land and self.land.landed:
-                if self.armed(): self.command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM,0)
-                else: self.set_state('COMPLETE','Landed and disarmed at home')
+            land_fresh=self.land is not None and now-self.land_received<self.FRESH_S
+            if fresh and land_fresh and self.land.landed and self.armed() and now-self.last_disarm>1:
+                # Normal (non-forced) disarm, only on a fresh landed report; PX4 rejects it in flight.
+                self.command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM,0); self.last_disarm=now
+            if self.landed_confirmed(now,fresh): self.set_state('COMPLETE','Landed and disarmed at home')
+            else: self.check_confirmation_deadline(now,fresh)
             return
         if self.state!='ARMING':
             # Detect the actual position against the same buffered demo zones as the API.

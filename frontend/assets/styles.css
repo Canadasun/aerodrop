@@ -1880,7 +1880,7 @@ td code {
 
 .empty-state h3 {
   font-size:19px;
-  color:#718958;
+  color:#5f7849;  /* 4.9:1 on white (WCAG AA) */
   margin:16px 0 8px;
 }
 

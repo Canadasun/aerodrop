@@ -19,7 +19,7 @@ let browser,page;
   window.__testFrame={drone_id:'drone_01',state:'READY',latitude:51.115,longitude:-114.110,altitude_m:0,battery_pct:82,px4_battery_pct:82,armed:false,landed:true,px4_nav_state:4,preflight_checks_pass:true,heading_deg:90,horizontal_speed_m_s:0,vertical_speed_m_s:0,mission_elapsed_s:0,mission_id:null,payload_status:'PENDING',route_index:0,waypoint_count:0};
   window.__producer=new WebSocket(`${location.protocol==='https:'?'wss':'ws'}://${location.host}/ws/telemetry/drone_01?role=drone`);
   await new Promise((resolve,reject)=>{window.__producer.onopen=resolve;window.__producer.onerror=reject});
-  window.__testFrameTimer=setInterval(()=>{if(window.__producer.readyState===1){const now=Date.now()/1000;window.__producer.send(JSON.stringify({...window.__testFrame,timestamp_unix:now,position_timestamp_unix:window.__testFrame.stale?now-15:now,status_timestamp_unix:now}));}},200);
+  window.__testFrameTimer=setInterval(()=>{if(window.__producer.readyState===1){const now=Date.now()/1000;window.__producer.send(JSON.stringify({...window.__testFrame,timestamp_unix:now,position_timestamp_unix:window.__testFrame.stale?now-15:now,status_timestamp_unix:now,mission_state_timestamp_unix:window.__testFrame.controllerSilent?now-15:now}));}},200);
  });}
  async function frame(patch){await page.evaluate(value=>Object.assign(window.__testFrame,value),patch);await page.waitForTimeout(350);}
  await page.goto(origin);
@@ -29,8 +29,17 @@ let browser,page;
  await page.waitForFunction(()=>!document.querySelector('#startMission').disabled);
  await check('Health, telemetry, route and all real preflight checks render',async()=>{
   assert.match(await page.locator('#apiPill').innerText(),/online/i);assert.match(await page.locator('#streamPill').innerText(),/connected/i);
-  assert.equal(await page.locator('#batteryValue').innerText(),'82');assert.equal(await page.locator('#preflightChecks .good').count(),4);
+  assert.equal(await page.locator('#batteryValue').innerText(),'82');assert.equal(await page.locator('#preflightChecks .good').count(),5);
   assert.match(await page.locator('#details').innerText(),/WAYPOINTS/);assert.equal(await page.locator('#returnMission').isDisabled(),true);
+ });
+ await check('A silent mission controller, unconfirmed landing or failsafe blocks launch',async()=>{
+  await frame({controllerSilent:true});await page.waitForFunction(()=>document.querySelector('#startMission').disabled);
+  assert.match(await page.locator('#launchReason').innerText(),/Mission controller is not reporting/);
+  await frame({controllerSilent:false,landed:false});assert.match(await page.locator('#launchReason').innerText(),/confirm the aircraft is landed/);
+  await frame({landed:true,px4_failsafe:true});assert.match(await page.locator('#launchReason').innerText(),/failsafe/);
+  await frame({px4_failsafe:false,preflight_checks_pass:false});await page.waitForFunction(()=>!document.querySelector('#startMission').disabled);
+  assert.match(await page.locator('#launchReason').innerText(),/preflight flag is not set/);
+  await frame({preflight_checks_pass:true});
  });
  await check('Dirty coordinates block dispatch until replanned',async()=>{
   await page.locator('#destLat').fill('51.1162');assert.equal(await page.locator('#startMission').isDisabled(),true);
@@ -94,7 +103,7 @@ let browser,page;
   const downloadEvent=page.waitForEvent('download');await page.locator('#exportHistory').click();assert.equal((await downloadEvent).suggestedFilename(),'aerodrop-missions.json');
  });
  await check('Systems, configuration and unsupported capabilities are honest',async()=>{
-  await page.locator('[data-view="systems"]').first().click();assert.equal(await page.locator('.system-card').count(),6);assert.match(await page.locator('#capabilityList').innerText(),/Order management\s+Not implemented/);
+  await page.locator('[data-view="systems"]').first().click();assert.equal(await page.locator('.system-card').count(),7);assert.match(await page.locator('#systemCards').innerText(),/Mission controller/);assert.match(await page.locator('#capabilityList').innerText(),/Order management\s+Not implemented/);
   await page.locator('.diagnostics summary').click();assert.match(await page.locator('#rawSnapshot').innerText(),new RegExp(mission.id));await page.evaluate(()=>window.scrollTo(0,0));await page.waitForTimeout(200);await page.screenshot({path:output+'/dashboard-systems.png',fullPage:true});
  });
  await check('Telemetry reconnects automatically',async()=>{

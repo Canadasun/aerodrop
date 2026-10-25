@@ -3,7 +3,7 @@ const fs=require('fs');
 const output=process.env.AERODROP_TEST_OUTPUT || 'test-artifacts';
 fs.mkdirSync(output,{recursive:true});
 (async()=>{
- const browser=await chromium.launch({headless:true});
+ const browser=await chromium.launch({headless:!!process.env.HEADLESS});
  const page=await browser.newPage({viewport:{width:1280,height:900}});
  await page.addInitScript(()=>{const Native=window.WebSocket;window.__sockets=[];window.WebSocket=class extends Native{constructor(...args){super(...args);window.__sockets.push(this)}}});
  const errors=[];page.on('pageerror',e=>errors.push(e.message));
@@ -31,7 +31,7 @@ fs.mkdirSync(output,{recursive:true});
    if(t.state==='NAVIGATING' && !inspectedWaypoints){
     await page.locator('#waypointsTabButton').click();
     const waypointText=await page.locator('#waypointList').innerText();
-    if(waypointText.includes('NaN') || !waypointText.includes('50.'))throw Error('Invalid live waypoint display: '+waypointText);
+    if(waypointText.includes('NaN') || !/-?\d+\.\d{5}, -?\d+\.\d{5}/.test(waypointText))throw Error('Invalid live waypoint display: '+waypointText);
     await page.locator('#activityTabButton').click();inspectedWaypoints=true;
    }
    if(scenario!=='delivery' && !injected && t.state==='NAVIGATING'){

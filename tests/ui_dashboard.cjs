@@ -10,7 +10,7 @@ fs.mkdirSync(output,{recursive:true});
 const results=[];
 let browser,page;
 (async()=>{
- browser=await chromium.launch({headless:true});
+ browser=await chromium.launch({headless:!!process.env.HEADLESS});
  const context=await browser.newContext({viewport:{width:1512,height:1050},acceptDownloads:true});
  page=await context.newPage();const errors=[];page.on('pageerror',e=>errors.push(e.message));
  await page.addInitScript(()=>{const Native=WebSocket;window.__viewerSockets=[];window.WebSocket=class extends Native{constructor(...args){super(...args);if(String(args[0]).includes('role=viewer'))window.__viewerSockets.push(this);}}});

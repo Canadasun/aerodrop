@@ -2,7 +2,7 @@ const {chromium}=require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const AxeBuilder=require(process.env.AXE_MODULE || '@axe-core/playwright').default;
 const fs=require('fs');
 (async()=>{
- const browser=await chromium.launch({headless:true});const context=await browser.newContext({viewport:{width:1512,height:1050}});const page=await context.newPage();
+ const browser=await chromium.launch({headless:!!process.env.HEADLESS});const context=await browser.newContext({viewport:{width:1512,height:1050}});const page=await context.newPage();
  await page.goto(process.env.AERODROP_UI_TEST_URL || 'http://localhost:18000');await page.waitForTimeout(2000);
  const results=[];
  for(const view of ['overview','history','systems']){

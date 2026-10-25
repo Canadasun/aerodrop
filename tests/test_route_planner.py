@@ -68,6 +68,34 @@ class RoutePlannerTests(unittest.TestCase):
         self.assertEqual(result["bypassed_zones"], [])
         self.assertEqual(len(result["waypoints"]), 2)
 
+    def test_detour_preset_flies_around_the_nose_hill_zone(self):
+        from app.main import Coordinate, dashboard_config, to_local
+        presets = {p["id"]: p["destination"] for p in dashboard_config()["presets"]}
+        result = create_route(RouteRequest(start=[51.115, -114.110],
+                                           destination=[presets["detour"]["latitude"], presets["detour"]["longitude"]]))
+        self.assertEqual(result["bypassed_zones"], ["demo_zone_nose_hill"])
+        self.assertGreaterEqual(len(result["waypoints"]), 4, "the corridor turns around the zone")
+        points = [to_local(Coordinate(latitude=w["latitude"], longitude=w["longitude"]), 51.0447)
+                  for w in result["waypoints"]]
+        required = SAFETY_MARGIN_M + CORRIDOR_HALF_WIDTH_M
+        for a, b in zip(points, points[1:]):
+            for i in range(201):
+                t = i / 200
+                point = (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
+                for zone in DEMO_ZONES:
+                    self.assertGreaterEqual(_distance_to_rect(point, zone["bounds_m"]), required - 1e-3)
+
+    def test_other_presets_stay_direct(self):
+        from app.main import dashboard_config
+        for preset in dashboard_config()["presets"]:
+            if preset["id"] == "detour":
+                continue
+            with self.subTest(preset["id"]):
+                d = preset["destination"]
+                result = create_route(RouteRequest(start=[51.115, -114.110], destination=[d["latitude"], d["longitude"]]))
+                self.assertEqual(result["bypassed_zones"], [])
+                self.assertEqual(len(result["waypoints"]), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2,7 +2,8 @@
 import math
 from aerodrop_core.coordinates import EARTH_RADIUS_M
 
-ZONES=((-900.,-700.,900.,700.),(1700.,1000.,2700.,2100.))
+# Same rectangles as DEMO_ZONES in backend/app/main.py (a unit test keeps them in sync).
+ZONES=((-900.,-700.,900.,700.),(1700.,1000.,2700.,2100.),(-2800.,8250.,-2600.,8400.))
 
 def return_corridor(route, next_index):
     """Retrace only reached waypoints; never jump across an unvisited bend."""

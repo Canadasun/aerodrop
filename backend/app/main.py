@@ -37,6 +37,9 @@ CALGARY_ORIGIN = (51.0447, -114.0719)
 DEMO_ZONES = [
     {"id": "demo_zone_centre", "bounds_m": (-900.0, -700.0, 900.0, 700.0)},
     {"id": "demo_zone_northeast", "bounds_m": (1700.0, 1000.0, 2700.0, 2100.0)},
+    # Between the Nose Hill launch point and the detour preset, so the demo shows avoidance.
+    # The executor's live geofence check (flight_logic.ZONES) must list the same rectangles.
+    {"id": "demo_zone_nose_hill", "bounds_m": (-2800.0, 8250.0, -2600.0, 8400.0)},
 ]
 SAFETY_MARGIN_M = 100.0
 CORRIDOR_HALF_WIDTH_M = 30.0
@@ -378,6 +381,9 @@ def dashboard_config():
              "destination": {"latitude": 51.116, "longitude": -114.109}},
             {"id": "original", "name": "Full demonstration", "description": "Original 2.2 km destination",
              "destination": {"latitude": 51.130, "longitude": -114.089}},
+            {"id": "detour", "name": "Detour demonstration",
+             "description": "1 km north, routed around a synthetic restricted zone",
+             "destination": {"latitude": 51.124, "longitude": -114.110}},
         ],
         "zones": {"type": "FeatureCollection", "features": [
             feature(z["id"], z["bounds_m"]) for z in DEMO_ZONES]},

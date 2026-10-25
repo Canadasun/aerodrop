@@ -51,6 +51,14 @@ let browser,page;
   assert.match(await page.locator('#routeMessage').innerText(),/safety buffer/);assert.equal(await page.locator('#startMission').isDisabled(),true);
   await page.locator('#preset').selectOption('quick');await page.waitForFunction(()=>!state.routeDirty&&!state.planning);
  });
+ await check('Detour preset plans a corridor around the Nose Hill zone',async()=>{
+  await page.locator('#preset').selectOption('detour');await page.waitForFunction(()=>!state.routeDirty&&!state.planning);
+  assert.match(await page.locator('#details').innerText(),/Detouring around 1 synthetic restricted zone/);
+  const planned=await page.evaluate(()=>state.planned);
+  assert.deepEqual(planned.bypassed_zones,['demo_zone_nose_hill']);assert.ok(planned.waypoints.length>=4,'corridor turns: '+planned.waypoints.length);
+  assert.ok(await page.evaluate(()=>state.config.zones.features.some(f=>f.properties.id==='demo_zone_nose_hill')),'zone is drawn from /config');
+  await page.locator('#preset').selectOption('quick');await page.waitForFunction(()=>!state.routeDirty&&!state.planning);
+ });
  await page.waitForFunction(()=>state.mapReady,{},{timeout:25000});
  await check('Map click updates destination and replans the real corridor',async()=>{
   await page.locator('#pickDestination').click();await page.waitForTimeout(1100);

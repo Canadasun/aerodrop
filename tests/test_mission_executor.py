@@ -225,5 +225,35 @@ class ReplayAndActionTests(ExecutorHarness):
         self.assertEqual(self.ex.actions, [])
 
 
+class LiveGeofenceTests(unittest.TestCase):
+    """The executor's in-flight geofence check must agree with the planner's map."""
+
+    def setUp(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
+        from app import main as api
+        from aerodrop_core import flight_logic
+        self.api, self.logic = api, flight_logic
+
+    def test_executor_and_planner_use_the_same_zones(self):
+        self.assertEqual(tuple(z["bounds_m"] for z in self.api.DEMO_ZONES), self.logic.ZONES)
+
+    def test_flying_the_detour_corridor_never_trips_the_live_geofence(self):
+        detour = next(p for p in self.api.dashboard_config()["presets"] if p["id"] == "detour")["destination"]
+        route = self.api.create_route(self.api.RouteRequest(
+            start=[51.115, -114.110], destination=[detour["latitude"], detour["longitude"]]))
+        points = route["waypoints"]
+        self.assertGreaterEqual(len(points), 4)
+        for a, b in zip(points, points[1:]):
+            for i in range(101):
+                t = i / 100
+                lat = a["latitude"] + (b["latitude"] - a["latitude"]) * t
+                lon = a["longitude"] + (b["longitude"] - a["longitude"]) * t
+                self.assertFalse(self.logic.near_zone(lat, lon, 0.0, 0.0), (lat, lon))
+
+    def test_the_direct_line_would_trip_it(self):
+        # Guards the test above: flying straight to the detour destination crosses the zone.
+        self.assertTrue(any(self.logic.near_zone(51.115 + 0.009 * i / 100, -114.110, 0.0, 0.0) for i in range(101)))
+
+
 if __name__ == "__main__":
     unittest.main()

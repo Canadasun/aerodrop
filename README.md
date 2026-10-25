@@ -1,8 +1,10 @@
 # AeroDrop local prototype
 
-Run `docker compose up --build -d`, then open http://localhost:8000 in your Windows browser. Docker Desktop must have host networking enabled for the ROS/PX4 services. The ROS and DDS agent containers share the host IPC namespace for Fast DDS shared-memory transport. The first ROS interface build can take a few minutes.
+Run `./scripts/demo.sh`. It starts the stack, waits until the drone passes the launch readiness check (PX4's position estimate can take several minutes to settle after a cold start), and then opens http://localhost:8000. Use `--build` after code changes, `--check` to report readiness without starting anything, and `--no-open` to skip the browser. If the drone isn't ready within 15 minutes (`AERODROP_READY_TIMEOUT`), the script prints the remaining blockers, the last simulator log lines and the restart command to try.
 
-Wait for **READY**, set the destination, click **Plan corridor**, then **Review & launch** and confirm **Launch simulation**. The start coordinates must match the drone's current launch location. A short first flight can use latitude `51.116`, longitude `-114.109`. The default **Quick delivery** preset is a short flight. Choose **Full demonstration** for the original destination about 2.2 km away, which takes several minutes each way.
+To start it by hand instead, run `docker compose up --build -d` and open http://localhost:8000 in your Windows browser. Docker Desktop must have host networking enabled for the ROS/PX4 services. The ROS and DDS agent containers share the host IPC namespace for Fast DDS shared-memory transport. The first ROS interface build can take a few minutes.
+
+Wait for **READY**, set the destination, click **Plan corridor**, then **Review & launch** and confirm **Launch simulation**. The start coordinates must match the drone's current launch location. A short first flight can use latitude `51.116`, longitude `-114.109`. The default **Quick delivery** preset is a short flight. Choose **Full demonstration** for the original destination about 2.2 km away, which takes several minutes each way. Choose **Detour demonstration** to show obstacle avoidance: the drop-off is 1 km north, behind a synthetic restricted zone, so the planned corridor turns around the zone's safety buffer and the drone follows it out and back.
 
 The simulated aircraft takes off to 30 m, follows the planned corridor, hovers, simulates payload release, retraces the corridor, lands, and disarms. **COMPLETE** means PX4's land detector reported landed and the vehicle disarmed, from fresh telemetry, held for one second; stale data never ends a mission. If landing or return-to-launch is not confirmed within 3 minutes, the mission stays in recovery and is flagged for operator attention instead of being reported as finished. **Return and land** skips delivery. **Low battery** latches a simulated low-battery condition and follows the reached route back. **Geofence breach** injects a synthetic geofence fault and commands PX4's native return-to-launch, ending at **ABORTED** after landing and disarming. Actual proximity to the synthetic map zones also triggers RTL. These are simulator controls, not controls for a physical drone.
 
@@ -29,7 +31,7 @@ npm install --no-save playwright @axe-core/playwright
 node tests/e2e_browser.cjs
 ```
 
-The browser suite executes short real PX4 delivery, low-battery return, and injected-geofence RTL, and operator-return flights, plus telemetry reconnection. Screenshots and results go to `test-artifacts/`; set `AERODROP_TEST_OUTPUT` to use another directory. The browser suites open a visible Chromium window; set `HEADLESS=1` to run them without one (CI or a machine with no display).
+The browser suite executes short real PX4 delivery, low-battery return, injected-geofence RTL and operator-return flights, a full delivery along the detour corridor, and telemetry reconnection. Run a subset with, for example, `AERODROP_SCENARIOS=detour`. Screenshots and results go to `test-artifacts/`; set `AERODROP_TEST_OUTPUT` to use another directory. The browser suites open a visible Chromium window; set `HEADLESS=1` to run them without one (CI or a machine with no display).
 
 ## Existing infrastructure examples
 
@@ -62,7 +64,9 @@ A recovered mission ends as ABORTED with the payload state shown as unknown, and
 
 ## Route planning limits
 
-The planner keeps the whole corridor clear of the synthetic zones: it plans the centreline at least 130 m from each zone (the 100 m safety buffer plus the 30 m corridor half-width), so the shaded 60 m corridor never overlaps a buffer. Destinations must be 5 m to 5 km from the start. The synthetic zones are near downtown Calgary, outside the 5 km range of the Nose Hill launch point, so the default presets fly direct routes; the obstacle-avoidance logic is covered by the planner unit tests.
+The planner keeps the whole corridor clear of the synthetic zones: it plans the centreline at least 130 m from each zone (the 100 m safety buffer plus the 30 m corridor half-width), so the shaded 60 m corridor never overlaps a buffer. Destinations must be 5 m to 5 km from the start. Two synthetic zones are near downtown Calgary, outside the 5 km range of the Nose Hill launch point. A third, `demo_zone_nose_hill`, sits between the launch point and the **Detour demonstration** drop-off, so that preset flies a planned detour (about 1.1 km instead of 1.0 km direct). The other presets fly direct routes.
+
+The mission executor runs its own live geofence check against the same zone list (`flight_logic.ZONES`; a unit test keeps it identical to the planner's) and commands RTL if the aircraft comes within 100 m of a zone. Tests check that the detour corridor never trips it. PX4's native return-to-launch (the geofence fault test, or a failsafe) flies straight home and does not know about the synthetic zones; operator return and low battery retrace the planned corridor instead.
 
 Telemetry now includes measured horizontal/vertical speed, heading, landing status, PX4 preflight/failsafe state, command acknowledgements, active waypoints, payload state and mission timing. Unknown measurements remain unavailable instead of showing invented zeroes. Mission history is local to the browser; it is not a server database. Order/database modules in this checkout are empty placeholders and are explicitly marked unavailable.
 

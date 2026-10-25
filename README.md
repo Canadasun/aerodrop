@@ -1,5 +1,7 @@
 # AeroDrop local prototype
 
+[![CI](https://github.com/Canadasun/aerodrop/actions/workflows/ci.yml/badge.svg)](https://github.com/Canadasun/aerodrop/actions/workflows/ci.yml)
+
 Run `./scripts/demo.sh`. It starts the stack, waits until the drone passes the launch readiness check (PX4's position estimate can take several minutes to settle after a cold start), and then opens http://localhost:8000. Use `--build` after code changes, `--check` to report readiness without starting anything, and `--no-open` to skip the browser. If the drone isn't ready within 15 minutes (`AERODROP_READY_TIMEOUT`), the script prints the remaining blockers, the last simulator log lines and the restart command to try.
 
 To start it by hand instead, run `docker compose up --build -d` and open http://localhost:8000 in your Windows browser. Docker Desktop must have host networking enabled for the ROS/PX4 services. The ROS and DDS agent containers share the host IPC namespace for Fast DDS shared-memory transport. The first ROS interface build can take a few minutes.
@@ -17,6 +19,8 @@ The Gazebo world includes IMU, magnetometer, GPS and other sensor systems, with 
 Payload/winch release is a timed simulation placeholder. The no-fly rectangles are synthetic examples. This is a local, single-process, single-drone prototype with in-memory mission and telemetry state; it is not a real flight system or an internet-facing service.
 
 ## Tests
+
+GitHub Actions (`.github/workflows/ci.yml`) runs the unit tests, the dashboard UI suite and the accessibility audit on every push and pull request. Real PX4 flights need the Docker stack, so they run locally (see below).
 
 With backend requirements installed:
 
@@ -68,7 +72,7 @@ The planner keeps the whole corridor clear of the synthetic zones: it plans the 
 
 The mission executor runs its own live geofence check against the same zone list (`flight_logic.ZONES`; a unit test keeps it identical to the planner's) and commands RTL if the aircraft comes within 100 m of a zone. Tests check that the detour corridor never trips it. PX4's native return-to-launch (the geofence fault test, or a failsafe) flies straight home and does not know about the synthetic zones; operator return and low battery retrace the planned corridor instead.
 
-Telemetry now includes measured horizontal/vertical speed, heading, landing status, PX4 preflight/failsafe state, command acknowledgements, active waypoints, payload state and mission timing. Unknown measurements remain unavailable instead of showing invented zeroes. Mission history is local to the browser; it is not a server database. Order/database modules in this checkout are empty placeholders and are explicitly marked unavailable.
+Telemetry now includes measured horizontal/vertical speed, heading, landing status, PX4 preflight/failsafe state, command acknowledgements, active waypoints, payload state and mission timing. Unknown measurements remain unavailable instead of showing invented zeroes. Mission history is local to the browser; it is not a server database. There is no order management, database or message broker yet; the dashboard's Systems view marks order management as not implemented.
 
 UI tests use a separate backend on port 18000. `tests/ui_dashboard.cjs` refuses other ports because it publishes synthetic test telemetry. Never run that suite against the flight stack. `tests/e2e_browser.cjs` is the separate real PX4 flight suite and uses the confirmation dialogs.
 

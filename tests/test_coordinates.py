@@ -8,7 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ros2_ws" / "src" /
 from aerodrop_core.coordinates import ned_to_map_xy, wgs84_to_ned  # noqa: E402
 
 
-class OffboardCoordinateTests(unittest.TestCase):
+class CoordinateFrameTests(unittest.TestCase):
     def test_north_and_east_displacements_follow_px4_xy_order(self):
         home = (51.115, -114.110)
         north, east = wgs84_to_ned(home[0] + 0.001, home[1] + 0.001, *home)

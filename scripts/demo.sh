@@ -66,11 +66,14 @@ else
 fi
 
 echo "Waiting for the drone to be ready to launch (up to $((TIMEOUT / 60)) min)…"
-start=$(date +%s); last=""
+start=$(date +%s); last=""; ready_polls=0
 while :; do
   elapsed=$(( $(date +%s) - start ))
   if out=$(readiness); then :; else out="Waiting for the dispatch API at $URL"; fi
-  if [[ "$out" == READY* ]]; then
+  # Telemetry counts as fresh for 3 s, so right after a container restart the last frames
+  # of the old process can still pass. Ready must hold across two polls 3 s apart.
+  if [[ "$out" == READY* ]]; then ready_polls=$((ready_polls + 1)); else ready_polls=0; fi
+  if [ "$ready_polls" -ge 2 ]; then
     read -r _ state battery <<<"$out"
     printf '\nREADY after %ss: drone %s, battery %s%%.\n' "$elapsed" "$state" "${battery%%.*}"
     echo "Dashboard: $URL"
@@ -79,6 +82,7 @@ while :; do
     exit 0
   fi
   first=${out%%$'\n'*}
+  [[ "$first" == READY* ]] && first="Ready; confirming it holds"
   if [ "$first" != "$last" ]; then printf '  [%4ss] %s\n' "$elapsed" "$first"; last="$first"; fi
   if [ "$elapsed" -ge "$TIMEOUT" ]; then
     echo

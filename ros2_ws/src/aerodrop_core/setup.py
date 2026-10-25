@@ -16,11 +16,10 @@ setup(
     zip_safe=True,
     maintainer="AeroDrop",
     maintainer_email="maintainer@example.com",
-    description="PX4 offboard control and delivery mission execution",
+    description="PX4 offboard delivery mission execution and telemetry bridge",
     license="Apache-2.0",
     entry_points={
         "console_scripts": [
-            "offboard_controller = aerodrop_core.offboard_controller:main",
             "mission_executor = aerodrop_core.mission_executor:main",
             "telemetry_bridge = aerodrop_core.telemetry_bridge:main",
         ],

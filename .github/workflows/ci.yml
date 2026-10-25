@@ -1,0 +1,66 @@
+# Runs everything that does not need the PX4 simulator: unit tests, the dashboard
+# UI suite and the accessibility audit (against an isolated backend on port 18000).
+# Real PX4 flights (tests/e2e_browser.cjs) need the Docker stack and run locally.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r backend/requirements.txt
+      - run: python -m unittest discover -s tests -v
+      - name: Check shell scripts parse
+        run: bash -n scripts/demo.sh
+
+  ui:
+    name: Dashboard UI and accessibility
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: pip install -r backend/requirements.txt
+      - name: Install Playwright and Chromium
+        run: |
+          npm install --no-save playwright@1.61.1 @axe-core/playwright@4.10.2
+          npx playwright install --with-deps chromium
+      - name: Start the isolated preview backend
+        working-directory: backend
+        run: |
+          nohup uvicorn app.main:app --host 127.0.0.1 --port 18000 --log-level warning > ../preview.log 2>&1 &
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:18000/health && exit 0; sleep 1; done
+          cat ../preview.log; exit 1
+      - name: Dashboard UI suite
+        run: node tests/ui_dashboard.cjs
+        env:
+          HEADLESS: "1"
+      - name: Accessibility audit
+        run: node tests/ui_accessibility.cjs
+        env:
+          HEADLESS: "1"
+      - name: Upload screenshots and results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-test-artifacts
+          path: |
+            test-artifacts/
+            preview.log
+          retention-days: 14

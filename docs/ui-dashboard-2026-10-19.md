@@ -51,6 +51,8 @@ The live dashboard is served at http://localhost:8000. Refresh the browser after
 
 ## Verification
 
+*Historical record from the 2026-10-19 dashboard redesign. Counts reflect the code at that date; for current results, see the README "Tests" section and the latest commit message.*
+
 - 13 routing, coordinate, mission-command and dashboard geometry/freshness regression tests passed.
 - 18 isolated browser interaction checks passed, including dirty-plan blocking, restriction errors, map clicks and dragging, layer toggles, launch cancellation, exact mission requests, stale telemetry, fault confirmation, local history/export, reconnection, mobile overflow and basemap outage.
 - Automated accessibility checks cover Operations, Missions and Systems. Final deployed results are recorded with the UI artifacts.

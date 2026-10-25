@@ -19,7 +19,7 @@ let browser,page;
   window.__testFrame={drone_id:'drone_01',state:'READY',latitude:51.115,longitude:-114.110,altitude_m:0,battery_pct:82,px4_battery_pct:82,armed:false,landed:true,px4_nav_state:4,preflight_checks_pass:true,heading_deg:90,horizontal_speed_m_s:0,vertical_speed_m_s:0,mission_elapsed_s:0,mission_id:null,payload_status:'PENDING',route_index:0,waypoint_count:0};
   window.__producer=new WebSocket(`${location.protocol==='https:'?'wss':'ws'}://${location.host}/ws/telemetry/drone_01?role=drone`);
   await new Promise((resolve,reject)=>{window.__producer.onopen=resolve;window.__producer.onerror=reject});
-  window.__testFrameTimer=setInterval(()=>{if(window.__producer.readyState===1){const now=Date.now()/1000;window.__producer.send(JSON.stringify({...window.__testFrame,timestamp_unix:now,position_timestamp_unix:window.__testFrame.stale?now-15:now,status_timestamp_unix:now,mission_state_timestamp_unix:window.__testFrame.controllerSilent?now-15:now}));}},200);
+  window.__testFrameTimer=setInterval(()=>{if(window.__producer.readyState===1){const now=Date.now()/1000;window.__producer.send(JSON.stringify({...window.__testFrame,timestamp_unix:now,position_timestamp_unix:window.__testFrame.stale?now-15:now,status_timestamp_unix:now,land_timestamp_unix:now,battery_timestamp_unix:now,mission_state_timestamp_unix:window.__testFrame.controllerSilent?now-15:now}));}},200);
  });}
  async function frame(patch){await page.evaluate(value=>Object.assign(window.__testFrame,value),patch);await page.waitForTimeout(350);}
  await page.goto(origin);
@@ -89,6 +89,16 @@ let browser,page;
  await check('Stale position disables active aircraft commands even with a live socket',async()=>{
   await frame({stale:true});await page.waitForFunction(()=>document.querySelector('#returnMission').disabled);assert.match(await page.locator('#connectionBanner').innerText(),/stale/i);
   await frame({stale:false});await page.waitForFunction(()=>!document.querySelector('#returnMission').disabled);
+ });
+ await check('A dialog left open across controller loss sends nothing',async()=>{
+  let posted=0;const count=r=>{if(r.url().endsWith('/mission/action'))posted++;};page.on('request',count);
+  await page.locator('#returnMission').click();assert.equal(await page.locator('#actionDialog').isVisible(),true);
+  await frame({controllerSilent:true});await page.waitForTimeout(3200);
+  await page.locator('#dialogConfirm').click();await page.waitForTimeout(400);
+  assert.equal(await page.locator('#dialogError').isVisible(),true);assert.match(await page.locator('#dialogError').innerText(),/Nothing was sent/);
+  assert.equal(posted,0,'no action request may be sent');
+  await page.locator('#dialogCancel').click();page.off('request',count);
+  await frame({controllerSilent:false});await page.waitForFunction(()=>!document.querySelector('#returnMission').disabled);
  });
  await check('Low-battery test has confirmation and posts the real action',async()=>{
   await page.locator('#batteryTest').click();assert.match(await page.locator('#dialogTitle').innerText(),/low battery/i);

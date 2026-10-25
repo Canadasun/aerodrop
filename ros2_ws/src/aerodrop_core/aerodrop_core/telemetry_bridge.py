@@ -79,7 +79,8 @@ class TelemetryBridge(Node):
         actual = max(0.0, min(100.0, remaining * 100.0)) if math.isfinite(remaining) and remaining >= 0 else None
         with self.lock:
             injected = self.snapshot.get("low_battery_injected", False)
-        self._update(px4_battery_pct=actual, battery_pct=min(actual, 19.0) if injected and actual is not None else actual)
+        self._update(px4_battery_pct=actual, battery_pct=min(actual, 19.0) if injected and actual is not None else actual,
+                     battery_timestamp_unix=time.time())
 
     def _mission_state(self, msg):
         # The executor publishes every 0.5 s, so this timestamp is its heartbeat. The frame's own

@@ -144,22 +144,80 @@ class TerminalConfirmationTests(ExecutorHarness):
 
 class ReplayAndActionTests(ExecutorHarness):
     def test_restart_does_not_replay_a_mission_that_existed_before_it(self):
-        old = {"id": "old", "created_at": mx.time.time(), "waypoints": [], "actions": [{"id": "a1", "name": "geofence"}]}
+        old = {"id": "old", "created_at": self.ex.boot_unix - 1, "waypoints": [],
+               "actions": [{"id": "a1", "name": "geofence", "mission_id": "old"}]}
         self.ex.ingest(old)
         self.assertIsNone(self.ex.pending)
         self.assertEqual(self.ex.actions, [])
-        new = dict(old, id="new", actions=[])
+        new = dict(old, id="new", created_at=mx.time.time(), actions=[])
         self.ex.ingest(new)
         self.assertEqual(self.ex.pending["id"], "new")
 
+    def test_a_launch_created_after_start_up_is_taken_even_in_the_first_poll(self):
+        # Codex follow-up: the first poll used to mark any command as "already seen".
+        self.ex.ingest({"id": "fresh", "created_at": mx.time.time(), "waypoints": [], "actions": []})
+        self.assertEqual(self.ex.pending["id"], "fresh")
+
+    def test_ready_is_not_advertised_before_the_first_command_poll(self):
+        self.ex.state = "WAITING_FOR_POSITION"
+        self.feed(landed=True, armed=False)
+        self.advance(0.1); self.ex.tick()
+        self.assertEqual(self.ex.state, "WAITING_FOR_POSITION")
+        self.ex.ingest({})
+        self.advance(0.1); self.feed(landed=True, armed=False); self.ex.tick()
+        self.assertEqual(self.ex.state, "READY")
+
+    def test_late_action_from_a_finished_mission_never_reaches_the_next_one(self):
+        # Codex follow-up reproduction: a geofence for mission m1 polled after it completed.
+        self.ex.ingest({})
+        self.ex.set_state("COMPLETE", "Landed and disarmed at home")
+        self.ex.ingest({"id": "m1", "created_at": 0, "actions": [{"id": "g", "name": "geofence", "mission_id": "m1"}]})
+        self.assertEqual(self.ex.actions, [])
+        self.feed(landed=True, armed=False); self.ex.battery_pct = 80.0
+        self.ex.begin({"id": "m2", "created_at": mx.time.time(), "waypoints": [{"latitude": 51.115, "longitude": -114.110}]})
+        self.assertEqual(self.ex.state, "ARMING")
+        self.advance(0.1); self.ex.tick()
+        self.assertNotEqual(self.ex.state, "RTL_FAILSAFE")
+
+    def test_airborne_restart_takes_ownership_and_commands_rtl(self):
+        self.ex.ingest({"id": "flying", "created_at": self.ex.boot_unix - 30, "actions": []})
+        self.ex.state = "WAITING_FOR_POSITION"; self.ex.mission_id = None
+        self.feed(landed=False, armed=True)
+        self.advance(0.1); self.ex.tick()
+        self.assertEqual(self.ex.state, "RTL_FAILSAFE")
+        self.assertEqual(self.ex.mission_id, "flying", "the mission identity is preserved")
+        self.assertTrue(self.ex.recovered_after_restart)
+        self.advance(0.1); self.ex.tick()
+        self.assertIn(20, self.commands(), "PX4 return-to-launch is commanded")
+        self.ex.publish_state()
+        self.assertIn('"payload_status": "UNKNOWN"', self.ex.state_pub.sent[-1].data)
+
+    def test_restart_while_armed_on_the_ground_disarms_instead_of_rtl(self):
+        self.ex.ingest({})
+        self.ex.state = "WAITING_FOR_POSITION"
+        self.feed(landed=True, armed=True)
+        self.advance(0.1); self.ex.tick()
+        self.assertEqual(self.ex.state, "LANDING")
+        for _ in range(15):
+            self.advance(0.1); self.feed(landed=True, armed=False); self.ex.tick()
+        self.assertEqual(self.ex.state, "ABORTED", "a recovery is never reported as a completed delivery")
+
+    def test_launch_is_rejected_with_a_reason_when_readiness_changed(self):
+        self.ex.ingest({})
+        self.feed(landed=True, armed=False); self.ex.battery_pct = 80.0
+        self.ex.land_received -= 60     # landing report went stale after the API accepted the launch
+        self.ex.begin({"id": "m3", "created_at": mx.time.time(), "waypoints": []})
+        self.assertEqual(self.ex.state, "ERROR")
+        self.assertEqual(self.ex.mission_id, "m3")
+        self.assertIn("Launch rejected by mission controller", self.ex.detail)
+
     def test_queued_actions_are_never_lost_and_geofence_goes_first(self):
         self.ex.ingest({})
-        self.ex.ingest({"id": "m1", "created_at": 0, "actions": [{"id": "r", "name": "return"},
-                                                                  {"id": "g", "name": "geofence"}]})
-        self.ex.ingest({"id": "m1", "created_at": 0, "actions": [{"id": "r", "name": "return"},
-                                                                  {"id": "g", "name": "geofence"}]})
-        self.assertEqual(self.ex.actions, ["return", "geofence"], "each action is taken once")
         self.ex.set_state("NAVIGATING")
+        actions = [{"id": "r", "name": "return", "mission_id": "m1"}, {"id": "g", "name": "geofence", "mission_id": "m1"}]
+        self.ex.ingest({"id": "m1", "created_at": 0, "actions": actions})
+        self.ex.ingest({"id": "m1", "created_at": 0, "actions": actions})
+        self.assertEqual(self.ex.actions, ["return", "geofence"], "each action is taken once")
         self.feed(landed=False, armed=True)
         self.ex.status.nav_state = 14
         self.advance(0.1); self.ex.tick()

@@ -48,7 +48,17 @@ MapLibre 5.6.2 and its licence are bundled under `frontend/assets/vendor`; only 
 
 The API and the dashboard apply the same launch policy. A mission starts only with fresh PX4 position and status (under 3 s old), a live mission-controller heartbeat, a landed and disarmed aircraft, no active PX4 failsafe, and a known battery level of at least 20%. `GET /status` lists every current blocker in `launch_blockers`. A false PX4 preflight flag is shown as a warning (`launch_warnings`), not a blocker: PX4 itself makes the final arming decision.
 
-Concurrent launch requests are serialized, so exactly one mission is accepted. In-flight actions (return, low battery, geofence) are queued, not overwritten, and a geofence action is handled first. The ROS nodes restart automatically if they crash, and a restarted executor ignores commands that existed before it started, so it never replays an old mission.
+Landing and battery readings must also be fresh (under 3 s), and the mission controller re-checks landing and battery when it picks up a queued launch. If anything changed, it rejects the launch with the reason (state ERROR) instead of dropping it silently.
+
+Concurrent launch requests are serialized, so exactly one mission is accepted. In-flight actions (return, low battery, geofence) need the same fresh PX4 data and controller heartbeat, are accepted only while the delivery is flying, and are bound to the current mission: a late action from a finished mission can never affect the next one. They are queued, not overwritten, and a geofence action is handled first. The dashboard re-checks the same conditions when a confirmation dialog is confirmed, so a dialog left open across a controller outage sends nothing.
+
+The ROS nodes restart automatically if they crash. A restarted executor:
+
+- never replays a command created before it started, but takes any command created after start-up, even in its first poll;
+- reports READY only after its first successful command poll;
+- if the aircraft is already armed in the air, takes ownership of the existing mission (keeping its ID), commands PX4 return-to-launch and never resumes the delivery. If the aircraft is armed on the ground, it disarms instead.
+
+A recovered mission ends as ABORTED with the payload state shown as unknown, and the Systems view shows the controller as "Recovering".
 
 ## Route planning limits
 

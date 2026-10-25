@@ -100,8 +100,9 @@ class MissionCommandTests(unittest.TestCase):
         self.assertEqual(raised.exception.status_code,409)
     def ready(self, **overrides):
         now=time.time()
-        live={'state':'READY','position_timestamp_unix':now,'status_timestamp_unix':now,
-              'mission_state_timestamp_unix':now,'latitude':51.115,'longitude':-114.110,
+        live={'state':'READY','timestamp_unix':now,'position_timestamp_unix':now,'status_timestamp_unix':now,
+              'mission_state_timestamp_unix':now,'land_timestamp_unix':now,'battery_timestamp_unix':now,
+              'latitude':51.115,'longitude':-114.110,
               'armed':False,'landed':True,'px4_failsafe':False,'battery_pct':80,'px4_battery_pct':80}
         live.update(overrides); return live
     def test_launch_requires_every_readiness_condition(self):
@@ -110,6 +111,8 @@ class MissionCommandTests(unittest.TestCase):
         for name, patch in [('stale PX4 status',{'status_timestamp_unix':old}),
                             ('silent mission controller',{'mission_state_timestamp_unix':old}),
                             ('not landed',{'landed':False}), ('failsafe',{'px4_failsafe':True}),
+                            ('hour-old landing report',{'land_timestamp_unix':time.time()-3600}),
+                            ('hour-old battery report',{'battery_timestamp_unix':time.time()-3600}),
                             ('low battery',{'battery_pct':5,'px4_battery_pct':5}),
                             ('unknown battery',{'battery_pct':None}),
                             ('injected low battery',{'low_battery_injected':True,'battery_pct':80,'px4_battery_pct':5})]:
@@ -144,12 +147,26 @@ class MissionCommandTests(unittest.TestCase):
             self.api.create_route=real_route
         self.assertEqual(results.count(409), 1, results)
         self.assertEqual(sum(isinstance(r,str) for r in results), 1, results)
+    def test_action_policy(self):
+        self.api.mission_command={'id':'m1','created_at':time.time(),'waypoints':[],'actions':[]}
+        old=time.time()-100
+        for name, live in [('stale controller and PX4 data',self.ready(state='NAVIGATING',armed=True,mission_id='m1',
+                                position_timestamp_unix=old,status_timestamp_unix=old,mission_state_timestamp_unix=old)),
+                           ('unsupported phase',self.ready(state='ARMING',armed=True,mission_id='m1')),
+                           ('a different mission',self.ready(state='NAVIGATING',armed=True,mission_id='other'))]:
+            with self.subTest(name):
+                self.api.hub.latest['drone_01']=live
+                with self.assertRaises(HTTPException) as raised:
+                    self.api.mission_action(self.api.MissionAction(name='geofence'))
+                self.assertEqual(raised.exception.status_code,409)
+        self.assertEqual(self.api.mission_command['actions'],[])
     def test_actions_queue_instead_of_overwriting(self):
-        self.api.hub.latest['drone_01']=self.ready(state='NAVIGATING',armed=True,timestamp_unix=time.time())
+        self.api.hub.latest['drone_01']=self.ready(state='NAVIGATING',armed=True,mission_id='m1')
         self.api.mission_command={'id':'m1','created_at':time.time(),'waypoints':[],'actions':[]}
         self.api.mission_action(self.api.MissionAction(name='return'))
         self.api.mission_action(self.api.MissionAction(name='geofence'))
         self.assertEqual([a['name'] for a in self.api.mission_command['actions']],['return','geofence'])
+        self.assertEqual({a['mission_id'] for a in self.api.mission_command['actions']},{'m1'})
     def test_rejects_second_queued_mission_and_active_flight(self):
         live=self.ready()
         self.api.hub.latest['drone_01']=live

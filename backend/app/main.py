@@ -252,9 +252,13 @@ def _age(live: dict, key: str, now: float) -> float:
     return now - value if isinstance(value, (int, float)) and math.isfinite(value) else math.inf
 
 
-def launch_blockers(live: dict, now: float | None = None) -> list[str]:
-    """Every reason the aircraft may not start a mission. The dashboard shows the same list."""
-    now = time.time() if now is None else now
+# Flight actions are accepted only in the phases where the executor acts on them (the
+# dashboard enables its buttons for the same phases).
+ACTION_STATES = {"TAKEOFF", "NAVIGATING", "DELIVERY_HOVER", "WINCH_DROP"}
+
+
+def link_blockers(live: dict, now: float) -> list[str]:
+    """Freshness of the data every command depends on: PX4 position and status, and the executor."""
     blockers = []
     if _age(live, "position_timestamp_unix", now) > FRESH_SECONDS:
         blockers.append("Waiting for fresh PX4 position telemetry")
@@ -262,6 +266,18 @@ def launch_blockers(live: dict, now: float | None = None) -> list[str]:
         blockers.append("Waiting for a fresh PX4 status report")
     if _age(live, "mission_state_timestamp_unix", now) > FRESH_SECONDS:
         blockers.append("Mission controller is not reporting; check the aerodrop_ros_node container")
+    return blockers
+
+
+def launch_blockers(live: dict, now: float | None = None) -> list[str]:
+    """Every reason the aircraft may not start a mission. The dashboard shows the same list."""
+    now = time.time() if now is None else now
+    blockers = link_blockers(live, now)
+    # A landed flag or battery value is only as good as its age.
+    if _age(live, "land_timestamp_unix", now) > FRESH_SECONDS:
+        blockers.append("Waiting for a fresh PX4 landing report")
+    if _age(live, "battery_timestamp_unix", now) > FRESH_SECONDS:
+        blockers.append("Waiting for a fresh battery report")
     if live.get("state") not in IDLE_STATES or live.get("armed"):
         blockers.append("Drone must be idle and disarmed to start a mission")
     if live.get("landed") is not True:
@@ -320,10 +336,17 @@ class MissionAction(BaseModel):
 @app.post("/mission/action", status_code=202)
 def mission_action(request: MissionAction):
     with mission_lock:
-        live = hub.latest.get("drone_01", {})
-        if time.time()-live.get("timestamp_unix",0)>3 or live.get("state") in IDLE_STATES or not mission_command:
+        live = dict(hub.latest.get("drone_01", {}))
+        blockers = link_blockers(live, time.time())
+        if blockers:
+            raise HTTPException(409, blockers[0])
+        if not mission_command or live.get("mission_id") != mission_command.get("id"):
             raise HTTPException(409, "No active mission")
-        action={"id": str(uuid.uuid4()), "name":request.name, "created_at": time.time()}
+        if live.get("state") not in ACTION_STATES:
+            raise HTTPException(409, f"The aircraft is {live.get('state')}; this command is accepted only while flying the delivery")
+        # Bound to the mission it was issued for, so it can never act on a later mission.
+        action={"id": str(uuid.uuid4()), "name":request.name, "created_at": time.time(),
+                "mission_id": mission_command["id"]}
         # Queued, never overwritten: a safety action must not be lost behind a later one.
         mission_command.setdefault("actions", []).append(action)
         return action

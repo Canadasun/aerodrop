@@ -45,6 +45,8 @@ class MissionExecutor(Node):
         self.landed_since = None; self.attention_required = False; self.last_disarm = 0.0
         self.state_detail = ''
         self.primed = False; self.seen_action_ids = set(); self.actions = []
+        self.boot_unix = time.time(); self.startup_command_id = None
+        self.payload_unknown = False; self.recovered_after_restart = False
         self.route = []; self.return_route = []; self.route_index = 0
         self.mission_id = None; self.last_command_id = None; self.pending = None
         self.last_action_id = None
@@ -97,10 +99,11 @@ class MissionExecutor(Node):
                                           'route_index':self.route_index,
                                           'waypoint_count':len(self.return_route if self.state=='RETURNING' else self.route),
                                           'active_waypoints':self.return_route if self.state=='RETURNING' else self.route,
-                                          'payload_status':('RELEASED' if self.payload_released else 'SKIPPED' if self.payload_skipped else 'LOWERING' if self.state=='WINCH_DROP' else 'PENDING'),
+                                          'payload_status':('RELEASED' if self.payload_released else 'UNKNOWN' if self.payload_unknown else 'SKIPPED' if self.payload_skipped else 'LOWERING' if self.state=='WINCH_DROP' else 'PENDING'),
                                           'mission_started_unix':self.started_unix, 'mission_finished_unix':self.ended_unix,
                                           'mission_elapsed_s':round((self.ended_at or time.monotonic())-self.started,1) if self.mission_id else 0,
                                           'attention_required':self.attention_required,
+                                          'recovered_after_restart':self.recovered_after_restart,
                                           'cruise_altitude_m':30.0})
         self.state_pub.publish(msg)
     def command(self,command,p1=0.0,p2=0.0):
@@ -118,20 +121,29 @@ class MissionExecutor(Node):
                 self.get_logger().debug(f'Mission API unavailable: {exc}')
             time.sleep(0.5)
     def ingest(self,data):
-        """Take new commands from the API. The first successful poll after a (re)start only records
-        what already exists, so a restarted executor never replays an old mission or action."""
+        """Take new commands from the API. A command created before this process started is
+        recorded, never run, so a restarted executor cannot replay an old mission; one created
+        after start-up is taken even if it arrives in the very first poll."""
         with self.lock:
             actions=[a for a in (data.get('actions') or []) if isinstance(a,dict) and a.get('id')]
             if not self.primed:
-                self.last_command_id=data.get('id'); self.seen_action_ids={a['id'] for a in actions}
-                self.primed=True; return
+                self.primed=True
+                if data.get('created_at',0)<self.boot_unix:
+                    self.last_command_id=data.get('id'); self.startup_command_id=data.get('id')
+                    self.seen_action_ids={a['id'] for a in actions}
+                    return
             if data.get('id') and data['id']!=self.last_command_id:
                 if time.time()-data.get('created_at',0)<10:
                     self.pending=data
                 self.last_command_id=data['id']
             for a in actions:
-                if a['id'] not in self.seen_action_ids:
-                    self.seen_action_ids.add(a['id']); self.actions.append(a['name'])
+                if a['id'] in self.seen_action_ids: continue
+                self.seen_action_ids.add(a['id'])
+                # Only actions issued for the mission being flown right now; anything else is stale.
+                if a.get('mission_id')==self.mission_id and self.state in self.ACTIVE:
+                    self.actions.append(a['name'])
+                else:
+                    self.get_logger().warning(f"Ignoring action {a.get('name')} for mission {a.get('mission_id')}")
     def landed_confirmed(self,now,fresh):
         """Landed and disarmed, from fresh land-detector and status data, held for LANDED_HOLD_S."""
         ok=(fresh and self.land is not None and now-self.land_received<self.FRESH_S
@@ -148,9 +160,36 @@ class MissionExecutor(Node):
             self.attention_required=True
             self.detail=f'{"Landing" if self.state=="LANDING" else "RTL"} not confirmed after {self.CONFIRM_DEADLINE_S:.0f} s; operator attention required'
             self.get_logger().error(self.detail)
+    def launch_rejection(self,now):
+        """Re-check readiness when the queued launch is consumed; the API's check may be stale."""
+        if self.land is None or now-self.land_received>=self.FRESH_S: return 'no fresh PX4 landing report'
+        if not self.land.landed: return 'PX4 does not report the aircraft as landed'
+        if self.battery_pct is None: return 'no battery report'
+        if self.battery_pct<20: return f'battery at {self.battery_pct:.0f}%'
+        if getattr(self.status,'failsafe',False): return 'PX4 failsafe active'
+        return ''
+    def recover_after_restart(self):
+        """This process started while the aircraft was already armed: the previous executor died in
+        flight. Never resume the delivery; take ownership and bring the aircraft home with PX4 RTL."""
+        self.mission_id=self.startup_command_id; self.route=[]; self.return_route=[]; self.route_index=0
+        self.started=time.monotonic(); self.started_unix=time.time(); self.ended_at=self.ended_unix=None
+        self.payload_released=False; self.payload_skipped=False; self.payload_unknown=True
+        self.recovered_after_restart=True
+        now=time.monotonic()
+        on_ground=self.land is not None and now-self.land_received<self.FRESH_S and bool(self.land.landed)
+        if on_ground:   # armed but landed (e.g. it died while arming): land/disarm, don't climb for RTL
+            self.set_state('LANDING','Mission controller restarted while armed on the ground; disarming')
+        else:
+            self.set_state('RTL_FAILSAFE','Mission controller restarted in flight; PX4 return-to-launch')
     def begin(self,data):
         if self.state in self.ACTIVE or self.armed(): return
         if self.position is None or time.time()-data.get('created_at',0)>=10: return
+        with self.lock: self.actions=[]
+        self.payload_unknown=False; self.recovered_after_restart=False
+        reason=self.launch_rejection(time.monotonic())
+        if reason:
+            self.mission_id=data['id']; self.route=[]; self.started=time.monotonic(); self.started_unix=time.time()
+            self.set_state('ERROR',f'Launch rejected by mission controller: {reason}'); return
         self.mission_id=data['id']; self.route=data['waypoints']; self.route_index=0
         self.launch_x=float(self.position.x); self.launch_y=float(self.position.y)
         self.return_route=[]; self.setpoints=0; self.started=time.monotonic()
@@ -186,7 +225,12 @@ class MissionExecutor(Node):
         now=time.monotonic()
         fresh=self.position is not None and now-self.position_received<2 and self.status is not None and now-self.status_received<2
         if self.state not in self.ACTIVE:
-            if fresh and not self.armed() and self.state=='WAITING_FOR_POSITION': self.set_state('READY')
+            # Actions only ever apply to the active mission; drop any that arrive while idle.
+            with self.lock: self.actions=[]
+            if fresh and self.armed() and self.state=='WAITING_FOR_POSITION':
+                self.recover_after_restart(); return
+            # READY only once the command channel is reconciled, so no launch can be lost.
+            if fresh and not self.armed() and self.primed and self.state=='WAITING_FOR_POSITION': self.set_state('READY')
             with self.lock: pending=self.pending
             if pending and fresh and not self.armed():
                 with self.lock: self.pending=None
@@ -203,7 +247,7 @@ class MissionExecutor(Node):
             if self.state not in ('RTL_FAILSAFE','LANDING'):
                 self.set_state('RTL_FAILSAFE','Position/status telemetry stale; PX4 RTL')
         if self.state=='RTL_FAILSAFE':
-            self.payload_skipped=not self.payload_released
+            if not self.payload_unknown: self.payload_skipped=not self.payload_released
             if now-self.last_request>2:
                 self.command(VehicleCommand.VEHICLE_CMD_NAV_RETURN_TO_LAUNCH); self.last_request=now
             if self.landed_confirmed(now,fresh): self.set_state('ABORTED','RTL landed and disarmed')
@@ -216,7 +260,9 @@ class MissionExecutor(Node):
             if fresh and land_fresh and self.land.landed and self.armed() and now-self.last_disarm>1:
                 # Normal (non-forced) disarm, only on a fresh landed report; PX4 rejects it in flight.
                 self.command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM,0); self.last_disarm=now
-            if self.landed_confirmed(now,fresh): self.set_state('COMPLETE','Landed and disarmed at home')
+            if self.landed_confirmed(now,fresh):
+                if self.recovered_after_restart: self.set_state('ABORTED','Recovered after controller restart; landed and disarmed')
+                else: self.set_state('COMPLETE','Landed and disarmed at home')
             else: self.check_confirmation_deadline(now,fresh)
             return
         if self.state!='ARMING':

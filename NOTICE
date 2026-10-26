@@ -1,5 +1,5 @@
 AeroDrop
-Copyright 2026 Idowu Peter Ayeni
+Copyright 2026 Emerald Software Solutions
 
 This project includes third-party components under their own licenses:
 - ros2_ws/src/px4_msgs: PX4 message definitions (BSD 3-Clause), see ros2_ws/src/px4_msgs/LICENSE.

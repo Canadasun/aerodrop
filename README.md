@@ -79,3 +79,7 @@ UI tests use a separate backend on port 18000. `tests/ui_dashboard.cjs` refuses 
 ## License
 
 Apache License 2.0, see [LICENSE](LICENSE). Bundled PX4 message definitions and MapLibre GL JS keep their BSD 3-Clause licenses; see [NOTICE](NOTICE).
+
+## Contact
+
+AeroDrop is built by Emerald Software Solutions. For partnerships, pilots or a live demo, contact Peter Ayeni at pmayeni1@gmail.com or support@waineappointments.com.

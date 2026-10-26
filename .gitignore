@@ -14,3 +14,4 @@ test-artifacts/
 node_modules/
 .env
 _review/
+AeroDrop_Demo_Script/

@@ -2,6 +2,12 @@
 
 [![CI](https://github.com/Canadasun/aerodrop/actions/workflows/ci.yml/badge.svg)](https://github.com/Canadasun/aerodrop/actions/workflows/ci.yml)
 
+AeroDrop is delivery mission software for drones. It plans a corridor that keeps clear of restricted zones, checks that the aircraft is ready to launch, flies the delivery, releases the payload and brings the aircraft home, with safe returns on low battery, geofence breach or operator command. It runs the PX4 autopilot with a ROS 2 mission executor, a FastAPI backend and a web operations dashboard.
+
+**Status: simulation only.** It flies PX4 software-in-the-loop in Gazebo; it has not flown a physical aircraft, the payload release is timed, and the restricted zones are synthetic. Built by Emerald Software Solutions; see [Contact](#contact).
+
+![AeroDrop dashboard after a completed simulated delivery](docs/images/dashboard-delivery.png)
+
 Run `./scripts/demo.sh`. It starts the stack, waits until the drone passes the launch readiness check (PX4's position estimate can take several minutes to settle after a cold start), and then opens http://localhost:8000. Use `--build` after code changes, `--check` to report readiness without starting anything, and `--no-open` to skip the browser. If the drone isn't ready within 15 minutes (`AERODROP_READY_TIMEOUT`), the script prints the remaining blockers, the last simulator log lines and the restart command to try.
 
 To start it by hand instead, run `docker compose up --build -d` and open http://localhost:8000 in your Windows browser. Docker Desktop must have host networking enabled for the ROS/PX4 services. The ROS and DDS agent containers share the host IPC namespace for Fast DDS shared-memory transport. The first ROS interface build can take a few minutes.

@@ -12,7 +12,7 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-URL="http://localhost:8000"
+URL="${AERODROP_URL:-http://localhost:8000}"   # dashboard and API address
 TIMEOUT="${AERODROP_READY_TIMEOUT:-900}"   # PX4's EKF can take several minutes to align
 BUILD=0; CHECK=0; OPEN=1
 for arg in "$@"; do
@@ -25,7 +25,8 @@ for arg in "$@"; do
   esac
 done
 
-# Prints "READY", or one blocker per line. Exit code 1 if the API is unreachable.
+# Prints "READY", or one blocker per line. Exit code 1 if the API is unreachable
+# (quietly: while the API starts, curl returns nothing and the parser fails).
 readiness() {
   curl -fsS --max-time 3 "$URL/status" 2>/dev/null | python3 -c '
 import json, sys
@@ -36,7 +37,7 @@ if blockers:
     print("\n".join(blockers))
 else:
     print("READY", telemetry.get("state", ""), telemetry.get("battery_pct", ""))
-' || return 1
+' 2>/dev/null || return 1
 }
 
 open_dashboard() {

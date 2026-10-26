@@ -41,7 +41,7 @@ npm install --no-save playwright @axe-core/playwright
 node tests/e2e_browser.cjs
 ```
 
-The browser suite executes short real PX4 delivery, low-battery return, injected-geofence RTL and operator-return flights, a full delivery along the detour corridor, and telemetry reconnection. Run a subset with, for example, `AERODROP_SCENARIOS=detour`. Screenshots and results go to `test-artifacts/`; set `AERODROP_TEST_OUTPUT` to use another directory. The browser suites open a visible Chromium window; set `HEADLESS=1` to run them without one (CI or a machine with no display).
+The browser suite executes short real PX4 delivery, low-battery return, injected-geofence RTL and operator-return flights, a full delivery along the detour corridor, and telemetry reconnection. Run a subset with, for example, `AERODROP_SCENARIOS=detour`. Screenshots and results go to `test-artifacts/`; set `AERODROP_TEST_OUTPUT` to use another directory. The browser suites open a visible Chromium window; set `HEADLESS=1` to run them without one (CI or a machine with no display). Keep a visible window in front while it runs: on WSL, a covered window or a locked screen can stop the map from being drawn, so its screenshots show a blank map although the flights pass.
 
 ## Existing infrastructure examples
 
